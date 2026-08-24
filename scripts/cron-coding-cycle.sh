@@ -95,7 +95,7 @@ if [ "$CODER_EXIT" -ne 0 ]; then
   exit "$CODER_EXIT"
 fi
 
-if git diff --quiet -- . ':!reports' ':!data/raw' && git diff --cached --quiet -- . ':!reports' ':!data/raw'; then
+if [ -z "$(git status --porcelain --untracked-files=normal -- . ':(exclude)data/raw' ':(exclude)reports')" ]; then
   cat "$CODER_OUTPUT"
   echo "RABBIT_AUTOMATION_RESULT status=idle reason=no-code-changes"
   exit 0
@@ -113,11 +113,20 @@ if [ "$VERIFY_EXIT" -ne 0 ]; then
   exit 1
 fi
 
+# Stage safe project changes before review so untracked files are included in the review diff.
+git add -A -- .
+git restore --staged -- data/raw 2>/dev/null || true
+if git diff --cached --name-only | grep -E '^(data/raw/|reports/)' >/dev/null; then
+  echo "RABBIT_AUTOMATION_RESULT status=error reason=forbidden-path-staged"
+  git diff --cached --name-only | grep -E '^(data/raw/|reports/)'
+  exit 1
+fi
+
 python3 - "$REVIEW_PROMPT" <<'PY'
 import pathlib, subprocess, sys
 prompt_path = pathlib.Path(sys.argv[1])
-stat = subprocess.run(["git", "diff", "--stat", "--", ".", ":!reports", ":!data/raw"], text=True, capture_output=True, check=False).stdout
-diff = subprocess.run(["git", "diff", "--", ".", ":!reports", ":!data/raw"], text=True, capture_output=True, check=False).stdout
+stat = subprocess.run(["git", "diff", "--cached", "--stat"], text=True, capture_output=True, check=False).stdout
+diff = subprocess.run(["git", "diff", "--cached"], text=True, capture_output=True, check=False).stdout
 max_chars = 120_000
 if len(diff) > max_chars:
     diff = diff[:max_chars] + "\n\n[DIFF TRUNCATED FOR REVIEW]\n"
@@ -182,15 +191,6 @@ if [ "$FIRST_REVIEW_LINE" != "APPROVED" ]; then
   cat "$VERIFY_OUTPUT"
   cat "$REVIEW_TEXT"
   echo "RABBIT_AUTOMATION_RESULT status=blocked phase=review"
-  exit 1
-fi
-
-# Stage project files. Ignored reports are naturally skipped; raw topology data is explicitly forbidden.
-git add -A -- .
-git restore --staged -- data/raw 2>/dev/null || true
-if git diff --cached --name-only | grep -E '^(data/raw/|reports/)' >/dev/null; then
-  echo "RABBIT_AUTOMATION_RESULT status=error reason=forbidden-path-staged"
-  git diff --cached --name-only | grep -E '^(data/raw/|reports/)'
   exit 1
 fi
 
