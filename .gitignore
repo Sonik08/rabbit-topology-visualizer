@@ -1,0 +1,19 @@
+node_modules/
+dist/
+coverage/
+.playwright/
+.DS_Store
+.env
+.env.*
+!.env.example
+
+# RabbitMQ topology exports may contain credentials in AMQP URIs.
+# Keep raw/customer data local only unless explicitly sanitized.
+!data/
+!data/raw/
+data/raw/*
+!data/raw/.gitkeep
+
+# Generated analysis/output artifacts
+out/
+reports/
