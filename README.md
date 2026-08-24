@@ -4,7 +4,7 @@ Local-first tool for loading RabbitMQ topology JSON exports and visualizing how 
 
 ## Current status
 
-Planning/bootstrap stage. See `PLAN.md` and `TASKS.md`.
+Planning/bootstrap stage. See `PLAN.md` and `TASKS.md`. Scheduled automation commits approved task changes and pushes them upstream for review.
 
 ## Data safety
 

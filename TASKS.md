@@ -1,6 +1,6 @@
 # RabbitMQ Topology Visualizer — Task Backlog
 
-Automation rule: each 2-hour run should complete at least one unchecked task when possible, run verification, request OpenAI review, then commit approved changes.
+Automation rule: each 2-hour run should complete at least one unchecked task when possible, run verification, request OpenAI review, then commit and push approved changes to GitHub.
 
 ## Bootstrap
 

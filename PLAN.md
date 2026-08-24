@@ -541,8 +541,9 @@ A scheduled automation job should run every 2 hours:
 5. Run the smallest meaningful verification gate.
 6. Use OpenAI 5.6-family model for review: configured slug `openai/gpt-5.6-sol`.
 7. Commit only if the OpenAI review approves.
-8. Leave rejected or blocked changes uncommitted for inspection/follow-up.
-9. Never commit `data/raw/`.
+8. Push approved commits to `origin/main` so changes can be reviewed on GitHub.
+9. Leave rejected or blocked changes uncommitted for inspection/follow-up.
+10. Never commit `data/raw/`.
 
 ## 12. Initial acceptance criteria
 

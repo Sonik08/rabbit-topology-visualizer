@@ -26,7 +26,7 @@ For scheduled coding runs:
    - `npm run build` if configured.
    - If no app scaffold exists yet, verify by direct file inspection.
 7. Update `TASKS.md` by checking off completed tasks with a concise note if useful.
-8. Do not commit directly from the coding model. The cron runner performs OpenAI review and commits approved changes.
+8. Do not commit directly from the coding model. The cron runner performs OpenAI review, commits approved changes, and pushes them to GitHub.
 
 ## Code style
 

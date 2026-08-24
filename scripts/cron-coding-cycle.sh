@@ -5,6 +5,7 @@ REPO_DIR="${REPO_DIR:-/home/sonik/.openclaw/workspace/rabbit-topology-visualizer
 CODING_MODEL="${CODING_MODEL:-anthropic/claude-opus-4-7}"
 REVIEW_MODEL="${REVIEW_MODEL:-openai/gpt-5.6-sol}"
 MAX_TASKS="${MAX_TASKS:-1}"
+UPSTREAM_BRANCH="${UPSTREAM_BRANCH:-main}"
 RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
 LOCK_DIR="$REPO_DIR/.automation.lock"
 REPORT_DIR="$REPO_DIR/reports/automation"
@@ -28,6 +29,11 @@ fi
 
 if git ls-files --error-unmatch data/raw >/dev/null 2>&1; then
   echo "RABBIT_AUTOMATION_RESULT status=error reason=data-raw-is-tracked"
+  exit 1
+fi
+
+if ! git remote get-url origin >/dev/null 2>&1; then
+  echo "RABBIT_AUTOMATION_RESULT status=blocked reason=missing-origin-remote"
   exit 1
 fi
 
@@ -190,7 +196,9 @@ COMMIT_SUBJECT="Complete Rabbit topology task"
 git commit -m "$COMMIT_SUBJECT" -m "Automated coding run using $CODING_MODEL; review approved by $REVIEW_MODEL."
 COMMIT_SHA="$(git rev-parse --short HEAD)"
 
+git push origin "HEAD:$UPSTREAM_BRANCH"
+
 cat "$CODER_OUTPUT"
 cat "$VERIFY_OUTPUT"
 cat "$REVIEW_TEXT"
-echo "RABBIT_AUTOMATION_RESULT status=committed commit=$COMMIT_SHA coding_model=$CODING_MODEL review_model=$REVIEW_MODEL"
+echo "RABBIT_AUTOMATION_RESULT status=pushed commit=$COMMIT_SHA branch=$UPSTREAM_BRANCH coding_model=$CODING_MODEL review_model=$REVIEW_MODEL"
