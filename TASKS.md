@@ -17,6 +17,7 @@ Automation rule: each 2-hour run should complete at least one unchecked task whe
 - [ ] Implement split management dump parser for `queues.json`, `exchanges.json`, `bindings.json`, `parameters.json`, and `policies.json`.
 - [ ] Implement runtime parameter parsing for shovels and federation upstreams.
 - [ ] Implement AMQP URI parser that redacts credentials and extracts host/vhost hints.
+- [ ] Implement RAR archive import support for the current `Downloads.rar` sample.
 - [ ] Implement diagnostics for malformed JSON, missing references, duplicates, and unresolved endpoints.
 
 ## Graph and query engine
@@ -34,7 +35,7 @@ Automation rule: each 2-hour run should complete at least one unchecked task whe
 
 ## UI
 
-- [ ] Add file/zip import panel.
+- [ ] Add file/RAR/zip import panel.
 - [ ] Add topology summary and diagnostics panel.
 - [ ] Add search box for queue/exchange names.
 - [ ] Add graph canvas with React Flow.

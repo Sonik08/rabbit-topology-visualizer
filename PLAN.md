@@ -2,7 +2,7 @@
 
 ## 1. Goal
 
-Build a local-first tool that loads RabbitMQ topology exports from zip files or folders and visualizes message-flow relationships between hosts, vhosts, exchanges, queues, bindings, shovels, federation links, dead-letter paths, and alternate exchanges.
+Build a local-first tool that loads RabbitMQ topology exports from RAR/zip archives or folders and visualizes message-flow relationships between hosts, vhosts, exchanges, queues, bindings, shovels, federation links, dead-letter paths, and alternate exchanges.
 
 Primary user query:
 
@@ -10,7 +10,21 @@ Primary user query:
 
 ## 2. Data movement from the SSH client machine
 
-The example zip/folder is on the machine you SSH **from**, in its Downloads folder. Run one of these commands on that machine, not inside the SSH session.
+The example `Downloads.rar` archive, or any zip/folder, is on the machine you SSH **from**, in its Downloads folder. Run one of these commands on that machine, not inside the SSH session.
+
+### Copy the current RAR file
+
+Linux/macOS:
+
+```bash
+scp ~/Downloads/Downloads.rar sonik@192.168.1.233:/home/sonik/.openclaw/workspace/rabbit-topology-visualizer/data/raw/
+```
+
+Windows PowerShell:
+
+```powershell
+scp "$env:USERPROFILE\Downloads\Downloads.rar" sonik@192.168.1.233:/home/sonik/.openclaw/workspace/rabbit-topology-visualizer/data/raw/
+```
 
 ### Copy one zip
 
@@ -48,6 +62,7 @@ Security note: RabbitMQ definitions can contain credentials in shovel/federation
 
 ### 3.1 Input/import
 
+- Accept `.rar` archives with nested JSON files, including the current `Downloads.rar` sample.
 - Accept `.zip` files with nested JSON files.
 - Accept local folders with nested JSON files.
 - Detect and parse:
@@ -132,6 +147,7 @@ Start as a local-first web app:
 - Cytoscape.js later if graph sizes become too large for React Flow.
 - Zustand for UI state.
 - JSZip for browser zip import.
+- RAR support via a browser-safe WASM library such as `node-unrar-js`, or a local helper using `7z`/`unrar` for development-only extraction.
 - Vitest for core parser/query tests.
 - Playwright later for UI smoke tests.
 - Optional Web Worker once imports/traversals become slow.
@@ -441,7 +457,7 @@ RabbitMQ topologies can contain cycles through exchange bindings, shovels, or fe
 
 ### Phase 3 — Import UI
 
-- Add file/zip/folder import panel.
+- Add file/RAR/zip/folder import panel.
 - Parse files in browser.
 - Show summary: hosts, vhosts, queues, exchanges, bindings, shovels, federation links, diagnostics.
 - Add manual metadata override for host/vhost inference.
@@ -496,7 +512,7 @@ Use sanitized fixtures:
 
 ### UI tests later
 
-- Import zip.
+- Import RAR/zip archive.
 - Search queue.
 - Highlight upstream path.
 - Filter by host/vhost.
@@ -533,7 +549,7 @@ A scheduled automation job should run every 2 hours:
 The first useful release should be able to:
 
 - Import a definitions JSON file.
-- Import a zip containing multiple topology JSON files.
+- Import a RAR or zip archive containing multiple topology JSON files.
 - Show counts and diagnostics.
 - Search for a queue/exchange by name.
 - Display upstream paths for a queue.

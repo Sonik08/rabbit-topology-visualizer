@@ -2,7 +2,7 @@
 
 ## Project goal
 
-Build a local-first RabbitMQ topology visualizer. It loads topology JSON/zip/folder inputs, models queues/exchanges/bindings/shovels/federation across hosts/vhosts, and shows upstream message flow for a selected queue or exchange.
+Build a local-first RabbitMQ topology visualizer. It loads topology JSON/RAR/zip/folder inputs, models queues/exchanges/bindings/shovels/federation across hosts/vhosts, and shows upstream message flow for a selected queue or exchange.
 
 ## Safety
 

@@ -8,4 +8,4 @@ Planning/bootstrap stage. See `PLAN.md` and `TASKS.md`.
 
 ## Data safety
 
-Raw RabbitMQ topology exports can include credentials inside AMQP shovel/federation URIs. Put raw zips under `data/raw/`; this path is intentionally git-ignored.
+Raw RabbitMQ topology exports can include credentials inside AMQP shovel/federation URIs. Put raw archives under `data/raw/`; this path is intentionally git-ignored.
