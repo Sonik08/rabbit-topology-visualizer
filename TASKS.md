@@ -4,7 +4,7 @@ Automation rule: each 2-hour run should complete at least one unchecked task whe
 
 ## Bootstrap
 
-- [ ] Create Vite + React + TypeScript app scaffold.
+- [x] Create Vite + React + TypeScript app scaffold. (package.json, vite.config.ts, tsconfig*.json, index.html, src/main.tsx, src/App.tsx)
 - [ ] Add Vitest and baseline `test`, `typecheck`, and `build` scripts.
 - [ ] Add project-local `AGENTS.md` with coding/automation rules.
 - [x] Add sanitized minimal RabbitMQ definitions fixture. (test/fixtures/minimal-definitions.json)
