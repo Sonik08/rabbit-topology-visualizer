@@ -6,12 +6,12 @@ Automation rule: each 2-hour run should complete at least one unchecked task whe
 
 - [x] Create Vite + React + TypeScript app scaffold. (package.json, vite.config.ts, tsconfig*.json, index.html, src/main.tsx, src/App.tsx)
 - [x] Add Vitest and baseline `test`, `typecheck`, and `build` scripts. (vitest devDep, `test`/`test:watch` scripts, `test` block in vite.config.ts, test/smoke.test.ts)
-- [ ] Add project-local `AGENTS.md` with coding/automation rules.
+- [x] Add project-local `AGENTS.md` with coding/automation rules. (AGENTS.md — landed in bootstrap; checkbox was stale)
 - [x] Add sanitized minimal RabbitMQ definitions fixture. (test/fixtures/minimal-definitions.json)
 
 ## Core model and parsing
 
-- [ ] Define canonical topology TypeScript model and stable ID helpers.
+- [x] Define canonical topology TypeScript model and stable ID helpers. (src/core/model/topology.ts, src/core/model/ids.ts, src/core/model/index.ts + 13 unit tests in test/core/model/ids.test.ts)
 - [ ] Implement JSON shape classifier for definitions exports vs split management dumps.
 - [ ] Implement RabbitMQ definitions export parser for exchanges, queues, bindings, vhosts, policies, and parameters.
 - [ ] Implement split management dump parser for `queues.json`, `exchanges.json`, `bindings.json`, `parameters.json`, and `policies.json`.
