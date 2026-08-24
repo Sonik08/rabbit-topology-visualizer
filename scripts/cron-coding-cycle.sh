@@ -27,8 +27,10 @@ if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   exit 1
 fi
 
-if git ls-files --error-unmatch data/raw >/dev/null 2>&1; then
+TRACKED_RAW="$(git ls-files data/raw | grep -v '^data/raw/.gitkeep$' || true)"
+if [ -n "$TRACKED_RAW" ]; then
   echo "RABBIT_AUTOMATION_RESULT status=error reason=data-raw-is-tracked"
+  printf '%s\n' "$TRACKED_RAW"
   exit 1
 fi
 
