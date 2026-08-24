@@ -7,7 +7,7 @@ Automation rule: each 2-hour run should complete at least one unchecked task whe
 - [ ] Create Vite + React + TypeScript app scaffold.
 - [ ] Add Vitest and baseline `test`, `typecheck`, and `build` scripts.
 - [ ] Add project-local `AGENTS.md` with coding/automation rules.
-- [ ] Add sanitized minimal RabbitMQ definitions fixture.
+- [x] Add sanitized minimal RabbitMQ definitions fixture. (test/fixtures/minimal-definitions.json)
 
 ## Core model and parsing
 

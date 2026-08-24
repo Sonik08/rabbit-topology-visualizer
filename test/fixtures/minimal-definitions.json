@@ -1,0 +1,216 @@
+{
+  "rabbit_version": "3.12.0",
+  "rabbitmq_version": "3.12.0",
+  "product_name": "RabbitMQ",
+  "product_version": "3.12.0",
+  "users": [
+    {
+      "name": "example-user",
+      "password_hash": "REDACTED",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": ["administrator"],
+      "limits": {}
+    }
+  ],
+  "vhosts": [
+    { "name": "/" },
+    { "name": "orders" }
+  ],
+  "permissions": [
+    {
+      "user": "example-user",
+      "vhost": "/",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    },
+    {
+      "user": "example-user",
+      "vhost": "orders",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "topic_permissions": [],
+  "parameters": [
+    {
+      "value": {
+        "src-uri": "amqp://REDACTED@remote-host-a.example.internal:5672",
+        "src-exchange": "orders.out",
+        "src-exchange-key": "orders.#",
+        "dest-uri": "amqp://REDACTED@localhost:5672",
+        "dest-exchange": "orders.in",
+        "ack-mode": "on-confirm",
+        "reconnect-delay": 5
+      },
+      "vhost": "orders",
+      "component": "shovel",
+      "name": "orders-shovel-from-remote-a"
+    },
+    {
+      "value": {
+        "uri": "amqp://REDACTED@remote-host-b.example.internal:5672",
+        "expires": 3600000,
+        "ack-mode": "on-confirm"
+      },
+      "vhost": "orders",
+      "component": "federation-upstream",
+      "name": "orders-federation-upstream-b"
+    }
+  ],
+  "global_parameters": [
+    {
+      "name": "cluster_name",
+      "value": "example-cluster-local"
+    }
+  ],
+  "policies": [
+    {
+      "vhost": "orders",
+      "name": "federate-orders-exchanges",
+      "pattern": "^orders\\.",
+      "apply-to": "exchanges",
+      "definition": {
+        "federation-upstream-set": "all"
+      },
+      "priority": 0
+    },
+    {
+      "vhost": "/",
+      "name": "dlx-default",
+      "pattern": "^work\\.",
+      "apply-to": "queues",
+      "definition": {
+        "dead-letter-exchange": "work.dlx",
+        "dead-letter-routing-key": "dead"
+      },
+      "priority": 0
+    }
+  ],
+  "queues": [
+    {
+      "name": "work.jobs",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "arguments": {}
+    },
+    {
+      "name": "work.dead",
+      "vhost": "/",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "arguments": {}
+    },
+    {
+      "name": "orders.incoming",
+      "vhost": "orders",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "arguments": {}
+    },
+    {
+      "name": "orders.audit",
+      "vhost": "orders",
+      "durable": true,
+      "auto_delete": false,
+      "exclusive": false,
+      "arguments": {}
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "work.direct",
+      "vhost": "/",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "work.dlx",
+      "vhost": "/",
+      "type": "fanout",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "orders.in",
+      "vhost": "orders",
+      "type": "topic",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {
+        "alternate-exchange": "orders.unrouted"
+      }
+    },
+    {
+      "name": "orders.audit",
+      "vhost": "orders",
+      "type": "fanout",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    },
+    {
+      "name": "orders.unrouted",
+      "vhost": "orders",
+      "type": "fanout",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "source": "work.direct",
+      "vhost": "/",
+      "destination": "work.jobs",
+      "destination_type": "queue",
+      "routing_key": "jobs",
+      "arguments": {}
+    },
+    {
+      "source": "work.dlx",
+      "vhost": "/",
+      "destination": "work.dead",
+      "destination_type": "queue",
+      "routing_key": "",
+      "arguments": {}
+    },
+    {
+      "source": "orders.in",
+      "vhost": "orders",
+      "destination": "orders.incoming",
+      "destination_type": "queue",
+      "routing_key": "orders.#",
+      "arguments": {}
+    },
+    {
+      "source": "orders.in",
+      "vhost": "orders",
+      "destination": "orders.audit",
+      "destination_type": "exchange",
+      "routing_key": "orders.*",
+      "arguments": {}
+    },
+    {
+      "source": "orders.audit",
+      "vhost": "orders",
+      "destination": "orders.audit",
+      "destination_type": "queue",
+      "routing_key": "",
+      "arguments": {}
+    }
+  ]
+}

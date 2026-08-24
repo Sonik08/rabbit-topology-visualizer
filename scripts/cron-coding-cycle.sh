@@ -185,9 +185,14 @@ if [ "$FIRST_REVIEW_LINE" != "APPROVED" ]; then
   exit 1
 fi
 
-# Stage only project files, never raw topology data or ignored reports.
-git add -- . ':!data/raw' ':!reports'
-git reset -q -- data/raw reports 2>/dev/null || true
+# Stage project files. Ignored reports are naturally skipped; raw topology data is explicitly forbidden.
+git add -A -- .
+git restore --staged -- data/raw 2>/dev/null || true
+if git diff --cached --name-only | grep -E '^(data/raw/|reports/)' >/dev/null; then
+  echo "RABBIT_AUTOMATION_RESULT status=error reason=forbidden-path-staged"
+  git diff --cached --name-only | grep -E '^(data/raw/|reports/)'
+  exit 1
+fi
 
 if git diff --cached --quiet; then
   echo "RABBIT_AUTOMATION_RESULT status=idle reason=no-staged-changes-after-exclusions"
