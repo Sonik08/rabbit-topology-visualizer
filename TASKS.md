@@ -22,7 +22,7 @@ Automation rule: each 2-hour run should complete at least one unchecked task whe
 
 ## Graph and query engine
 
-- [ ] Build graph nodes/edges from canonical topology.
+- [x] Build graph nodes/edges from canonical topology. (adds src/core/model/graph.ts with `GraphNode`/`GraphEdge`/`GraphNodeKind`/`GraphEdgeKind`; adds src/core/graph/buildGraph.ts + index.ts with `buildGraph` producing host/vhost/exchange/queue/shovel/federation/external nodes and contains/binds/alternate-exchange/dead-letter/shovels/federates edges, `contains` edges also link vhost→shovel and vhost→federation; external node ids AND labels sanitize each source segment via `safeSegment` *before* percent-encoding so any URI embedded in `ref.host`/`ref.vhost`/`ref.exchange`/`ref.queue` can't hide behind `%3A%2F%2F`; a final defensive gate runs every returned node, edge, and diagnostic through `deepSanitize` so any `amqp[s]://…` substring (nested, embedded, whitespace-prefixed, in labels, routing keys, arguments, or diagnostic messages) is redacted via `redactAmqpUri`; emits `graph.{alternate,dead-letter}-exchange-unresolved` diagnostics; 25 unit tests in test/core/graph/buildGraph.test.ts including per-kind leak checks (exchange args, queue args, binding routing key, diagnostic message, every external-ID source field) and a whole-graph credential-leak check that poisons every node kind + every edge kind + a diagnostic)
 - [ ] Build indexes by exact name, kind, host, and vhost.
 - [ ] Implement exact and ambiguous search for queues/exchanges.
 - [ ] Implement fuzzy search for queue/exchange names.
