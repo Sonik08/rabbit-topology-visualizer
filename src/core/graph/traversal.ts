@@ -105,7 +105,40 @@ export function upstreamForQueue(
   return traverseUpstream(input, targetQueueId, options);
 }
 
-/** Shared reverse-traversal used by queue and (later) exchange entry points. */
+/**
+ * Reverse-traverses the graph from `targetExchangeId` following routing edges
+ * (`binds`, `routes`, `alternate-exchange`, `shovels`, `federates`, optionally
+ * `dead-letter`) to enumerate every upstream ancestor node.
+ *
+ * Same semantics as `upstreamForQueue` but validates that the target is an
+ * exchange node. Useful when the user selects an exchange (rather than a
+ * queue) as the "where do messages arriving here come from?" starting point —
+ * for example, to trace publishers of a fan-out or an exchange-to-exchange
+ * downstream point.
+ */
+export function upstreamForExchange(
+  input: UpstreamGraphInput,
+  targetExchangeId: string,
+  options: UpstreamTraversalOptions = {},
+): UpstreamTraversalResult {
+  const nodeById = new Map<string, GraphNode>();
+  for (const n of input.nodes) nodeById.set(n.id, n);
+
+  const target = nodeById.get(targetExchangeId);
+  if (target === undefined || target.kind !== "exchange") {
+    return {
+      targetNodeId: targetExchangeId,
+      reachableAncestorIds: [],
+      paths: [],
+      truncated: false,
+      visitedCycles: [],
+    };
+  }
+
+  return traverseUpstream(input, targetExchangeId, options);
+}
+
+/** Shared reverse-traversal used by both queue and exchange entry points. */
 export function traverseUpstream(
   input: UpstreamGraphInput,
   targetNodeId: string,
