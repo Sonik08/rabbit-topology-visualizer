@@ -12,13 +12,13 @@ Automation rule: each 2-hour run should complete at least one unchecked task whe
 ## Core model and parsing
 
 - [x] Define canonical topology TypeScript model and stable ID helpers. (src/core/model/topology.ts, src/core/model/ids.ts, src/core/model/index.ts + 13 unit tests in test/core/model/ids.test.ts)
-- [ ] Implement JSON shape classifier for definitions exports vs split management dumps.
-- [ ] Implement RabbitMQ definitions export parser for exchanges, queues, bindings, vhosts, policies, and parameters.
-- [ ] Implement split management dump parser for `queues.json`, `exchanges.json`, `bindings.json`, `parameters.json`, and `policies.json`.
-- [ ] Implement runtime parameter parsing for shovels and federation upstreams.
-- [ ] Implement AMQP URI parser that redacts credentials and extracts host/vhost hints.
-- [ ] Implement RAR archive import support for the current `Downloads.rar` sample.
-- [ ] Implement diagnostics for malformed JSON, missing references, duplicates, and unresolved endpoints.
+- [x] Implement JSON shape classifier for definitions exports vs split management dumps. (src/core/parse/jsonClassifier.ts with filename + content heuristics, host/vhost path hints, adds `management-dump-vhosts`; 15 unit tests in test/core/parse/jsonClassifier.test.ts)
+- [x] Implement RabbitMQ definitions export parser for exchanges, queues, bindings, vhosts, policies, and parameters. (src/core/parse/definitionsParser.ts with `parseDefinitionsExport`, ID resolution, inferred-vhost + duplicate + missing-source-destination diagnostics, dead-letter arg extraction, cluster hint from `global_parameters`; keeps sanitized `parameters` as `RawParameter[]` for the shovel/federation task, including array-valued federation upstream sets; 17 unit tests in test/core/parse/definitionsParser.test.ts)
+- [x] Implement split management dump parser for `queues.json`, `exchanges.json`, `bindings.json`, `parameters.json`, and `policies.json`. (src/core/parse/splitDumpParser.ts with `parseSplitManagementDump` composing over `parseDefinitionsExport`, per-file sourceFileId tracking on host, `split-dump.file-not-array` diagnostic; 6 unit tests in test/core/parse/splitDumpParser.test.ts)
+- [x] Implement runtime parameter parsing for shovels and federation upstreams. (src/core/parse/runtimeParameters.ts with `parseRuntimeParameters` producing `Shovel[]` / `FederationLink[]` / `FederationUpstreamSetEntry[]`; consumes AMQP URI parser for redaction + host/vhost hints; supports dashed + underscored keys; 11 unit tests in test/core/parse/runtimeParameters.test.ts)
+- [x] Implement AMQP URI parser that redacts credentials and extracts host/vhost hints. (src/core/parse/amqpUri.ts with `parseAmqpUri` and `redactAmqpUri`, no raw/user credential fields in parsed output, query/fragment-safe URL parsing, IPv6 + percent-encoded vhost support, default port from scheme; 16 unit tests in test/core/parse/amqpUri.test.ts)
+- [x] Implement RAR archive import support for the current `Downloads.rar` sample. (adds `node-unrar-js` dep, src/core/parse/rarLoader.ts with `loadRarArchive` + `filterJsonEntries`, path-string filter, unsafe path + encrypted-entry diagnostics, compressed archive / entry count / per-entry bytes / total bytes limits; MIT-licensed FolderTest.rar fixture in test/fixtures/rar/; 10 unit tests in test/core/parse/rarLoader.test.ts covering round-trip + error paths + safety limits)
+- [x] Implement diagnostics for malformed JSON, missing references, duplicates, and unresolved endpoints. (adds `safeParseJson` in src/core/parse/safeJson.ts with `parse.{malformed-json,empty-input,non-string-input}`; adds src/core/resolve/{diagnostics.ts,index.ts} with `dedupeDiagnostics`, `groupBySeverity`, `sortBySeverity`, `summarizeDiagnostics`; existing parsers already emit the missing-reference/duplicate/unresolved-endpoint codes surfaced by these helpers; 10 unit tests across test/core/parse/safeJson.test.ts + test/core/resolve/diagnostics.test.ts)
 
 ## Graph and query engine
 
