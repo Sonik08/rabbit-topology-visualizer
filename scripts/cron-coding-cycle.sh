@@ -53,9 +53,17 @@ if git fetch --quiet origin "$UPSTREAM_BRANCH" >/dev/null 2>&1 \
     exit 0
   fi
   if [ "$AHEAD_COUNT" -gt 0 ]; then
-    git push origin "HEAD:$UPSTREAM_BRANCH"
+    if ! git push origin "HEAD:$UPSTREAM_BRANCH"; then
+      printf 'phase=push commit=pending branch=%s run_id=%s\n' "$UPSTREAM_BRANCH" "$RUN_ID" > "$STATE_DIR/pending-blocker.txt"
+      echo "RABBIT_AUTOMATION_RESULT status=blocked phase=push-pending branch=$UPSTREAM_BRANCH"
+      exit 0
+    fi
+    rm -f "$STATE_DIR/pending-blocker.txt" "$STATE_DIR/latest-review-text.txt" "$STATE_DIR/latest-verify-output.txt" 2>/dev/null || true
     echo "RABBIT_AUTOMATION_RESULT status=pushed-pending commits=$AHEAD_COUNT branch=$UPSTREAM_BRANCH"
     exit 0
+  fi
+  if grep -q '^phase=push' "$STATE_DIR/pending-blocker.txt" 2>/dev/null; then
+    rm -f "$STATE_DIR/pending-blocker.txt" "$STATE_DIR/latest-review-text.txt" "$STATE_DIR/latest-verify-output.txt" 2>/dev/null || true
   fi
 fi
 
@@ -68,16 +76,26 @@ REVIEW_TEXT="$REPORT_DIR/review-text-$RUN_ID.txt"
 LATEST_REVIEW_TEXT="$STATE_DIR/latest-review-text.txt"
 LATEST_VERIFY_OUTPUT="$STATE_DIR/latest-verify-output.txt"
 LATEST_CODER_OUTPUT="$STATE_DIR/latest-coder-output.txt"
+PENDING_BLOCKER="$STATE_DIR/pending-blocker.txt"
 DIRTY_AT_START="$(git status --porcelain --untracked-files=normal -- . ':(exclude)data/raw' ':(exclude)reports' || true)"
+if [ -s "$PENDING_BLOCKER" ] && [ -z "$DIRTY_AT_START" ]; then
+  cat "$PENDING_BLOCKER"
+  echo "RABBIT_AUTOMATION_RESULT status=blocked reason=pending-blocker-clean-tree"
+  exit 0
+fi
 RUN_MODE="task"
 MODE_RULES="- Complete at least one unchecked task from TASKS.md if possible. Maximum tasks this run: $MAX_TASKS.
 - Prefer the first unchecked task that can be completed safely and verified in one run."
-if [ -n "$DIRTY_AT_START" ]; then
+if [ -n "$DIRTY_AT_START" ] || [ -s "$PENDING_BLOCKER" ]; then
   RUN_MODE="repair"
   MODE_RULES="- Repair the existing dirty automation diff until verification and review should pass.
 - Do not start a new unchecked TASKS.md item while previous dirty work is unapproved.
 - Do not check off new tasks except to correct notes for files already changed.
 - Use the latest review/verification failure below as acceptance criteria."
+fi
+PENDING_BLOCKER_SNIPPET="(none)"
+if [ -s "$PENDING_BLOCKER" ]; then
+  PENDING_BLOCKER_SNIPPET="$(cat "$PENDING_BLOCKER")"
 fi
 LATEST_REVIEW_SNIPPET="(none)"
 if [ -s "$LATEST_REVIEW_TEXT" ]; then
@@ -108,6 +126,11 @@ Latest blocking review, if any:
 --- LATEST REVIEW START ---
 $LATEST_REVIEW_SNIPPET
 --- LATEST REVIEW END ---
+
+Pending automation blocker marker, if any:
+--- PENDING BLOCKER START ---
+$PENDING_BLOCKER_SNIPPET
+--- PENDING BLOCKER END ---
 
 Latest verification failure, if any:
 --- LATEST VERIFY START ---
@@ -149,6 +172,7 @@ set -e
 cp "$CODER_OUTPUT" "$LATEST_CODER_OUTPUT" 2>/dev/null || true
 
 if [ "$CODER_EXIT" -ne 0 ]; then
+  printf 'phase=coding exit=%s run_id=%s\n' "$CODER_EXIT" "$RUN_ID" > "$PENDING_BLOCKER"
   cat "$CODER_OUTPUT"
   echo "RABBIT_AUTOMATION_RESULT status=blocked phase=coding exit=$CODER_EXIT"
   exit 0
@@ -167,6 +191,7 @@ set -e
 
 if [ "$VERIFY_EXIT" -ne 0 ]; then
   cp "$VERIFY_OUTPUT" "$LATEST_VERIFY_OUTPUT" 2>/dev/null || true
+  printf 'phase=verification exit=%s run_id=%s\n' "$VERIFY_EXIT" "$RUN_ID" > "$PENDING_BLOCKER"
   cat "$CODER_OUTPUT"
   cat "$VERIFY_OUTPUT"
   echo "RABBIT_AUTOMATION_RESULT status=blocked phase=verification exit=$VERIFY_EXIT"
@@ -215,6 +240,7 @@ Diff:
 """)
 PY
 
+set +e
 python3 - "$REVIEW_MODEL" "$REVIEW_PROMPT" "$REVIEW_OUTPUT_JSON" <<'PY'
 import json, pathlib, subprocess, sys
 model, prompt_path, out_path = sys.argv[1], pathlib.Path(sys.argv[2]), pathlib.Path(sys.argv[3])
@@ -233,6 +259,17 @@ except Exception:
     text = res.stdout
 print(text)
 PY
+REVIEW_INFER_EXIT=$?
+set -e
+
+if [ "$REVIEW_INFER_EXIT" -ne 0 ]; then
+  printf 'phase=review-inference exit=%s run_id=%s\n' "$REVIEW_INFER_EXIT" "$RUN_ID" > "$PENDING_BLOCKER"
+  cat "$CODER_OUTPUT"
+  cat "$VERIFY_OUTPUT"
+  cat "$REVIEW_OUTPUT_JSON" 2>/dev/null || true
+  echo "RABBIT_AUTOMATION_RESULT status=blocked phase=review-inference exit=$REVIEW_INFER_EXIT"
+  exit 0
+fi
 
 python3 - "$REVIEW_OUTPUT_JSON" "$REVIEW_TEXT" <<'PY'
 import json, pathlib, sys
@@ -249,6 +286,7 @@ PY
 FIRST_REVIEW_LINE="$(grep -m1 -E '^(APPROVED|REJECTED:)' "$REVIEW_TEXT" || true)"
 if [ "$FIRST_REVIEW_LINE" != "APPROVED" ]; then
   cp "$REVIEW_TEXT" "$LATEST_REVIEW_TEXT" 2>/dev/null || true
+  printf 'phase=review run_id=%s\n' "$RUN_ID" > "$PENDING_BLOCKER"
   cat "$CODER_OUTPUT"
   cat "$VERIFY_OUTPUT"
   cat "$REVIEW_TEXT"
@@ -263,10 +301,19 @@ if git diff --cached --quiet; then
 fi
 
 COMMIT_SUBJECT="Complete Rabbit topology task"
-git commit -m "$COMMIT_SUBJECT" -m "Automated coding run using $CODING_MODEL; review approved by $REVIEW_MODEL."
+if ! git commit -m "$COMMIT_SUBJECT" -m "Automated coding run using $CODING_MODEL; review approved by $REVIEW_MODEL."; then
+  printf 'phase=commit run_id=%s\n' "$RUN_ID" > "$PENDING_BLOCKER"
+  echo "RABBIT_AUTOMATION_RESULT status=blocked phase=commit"
+  exit 0
+fi
 COMMIT_SHA="$(git rev-parse --short HEAD)"
 
-git push origin "HEAD:$UPSTREAM_BRANCH"
+if ! git push origin "HEAD:$UPSTREAM_BRANCH"; then
+  printf 'phase=push commit=%s branch=%s run_id=%s\n' "$COMMIT_SHA" "$UPSTREAM_BRANCH" "$RUN_ID" > "$PENDING_BLOCKER"
+  echo "RABBIT_AUTOMATION_RESULT status=blocked phase=push commit=$COMMIT_SHA branch=$UPSTREAM_BRANCH"
+  exit 0
+fi
+rm -f "$PENDING_BLOCKER" "$LATEST_REVIEW_TEXT" "$LATEST_VERIFY_OUTPUT" 2>/dev/null || true
 
 cat "$CODER_OUTPUT"
 cat "$VERIFY_OUTPUT"
