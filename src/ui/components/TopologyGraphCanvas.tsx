@@ -13,6 +13,7 @@ import { computeUpstreamHighlight } from "../../core/graph/upstreamHighlight";
 import { aggregateImportedTopology } from "../../core/import";
 import type { ImportResult } from "../../core/import";
 import { EntityDetailsPanel } from "./EntityDetailsPanel";
+import { PathExplanationPanel } from "./PathExplanationPanel";
 import { toReactFlowElements, type FlowEdge, type FlowNode } from "./topologyGraphElements";
 
 export interface TopologyGraphCanvasProps {
@@ -139,6 +140,7 @@ export function TopologyGraphCanvas({
         </ReactFlow>
       </div>
       <EntityDetailsPanel node={selectedNode} />
+      <PathExplanationPanel traversal={highlight.traversal} nodes={graph.nodes} />
     </section>
   );
 }
