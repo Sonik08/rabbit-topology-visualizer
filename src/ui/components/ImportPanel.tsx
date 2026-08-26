@@ -3,7 +3,7 @@ import {
   importTopologyArchive,
   type ImportResult,
 } from "../../core/import";
-import { summarizeDiagnostics } from "../../core/resolve/diagnostics";
+import { TopologySummaryPanel } from "./TopologySummaryPanel";
 
 export interface ImportPanelProps {
   onImported?: (result: ImportResult) => void;
@@ -93,88 +93,16 @@ export function ImportPanel({ onImported }: ImportPanelProps): JSX.Element {
         </p>
       )}
       {state.status === "done" && state.result && (
-        <ImportSummary result={state.result} />
+        <div>
+          <p style={{ margin: "0.5rem 0" }}>
+            Loaded {state.result.archiveKind.toUpperCase()}{" "}
+            <code>{state.result.archivePath}</code>.
+          </p>
+          <TopologySummaryPanel result={state.result} />
+        </div>
       )}
     </section>
   );
-}
-
-function ImportSummary({ result }: { result: ImportResult }): JSX.Element {
-  const totals = summarizeImportedTotals(result);
-  const diagnosticSummary = summarizeDiagnostics(result.diagnostics);
-  return (
-    <div>
-      <h3>
-        Loaded {result.archiveKind.toUpperCase()} <code>{result.archivePath}</code>
-      </h3>
-      <ul style={{ listStyle: "disc", paddingLeft: "1.25rem" }}>
-        <li>Files inside: {result.files.length}</li>
-        <li>Definitions exports: {totals.definitionsFiles}</li>
-        <li>Management-dump files: {totals.managementFiles}</li>
-        <li>Hosts: {totals.hosts}</li>
-        <li>Vhosts: {totals.vhosts}</li>
-        <li>Exchanges: {totals.exchanges}</li>
-        <li>Queues: {totals.queues}</li>
-        <li>Bindings: {totals.bindings}</li>
-        <li>Shovels: {totals.shovels}</li>
-        <li>Federation links: {totals.federations}</li>
-        <li>Policies: {totals.policies}</li>
-      </ul>
-      <p>
-        Diagnostics: {diagnosticSummary.total} total (
-        {diagnosticSummary.counts.error} errors,{" "}
-        {diagnosticSummary.counts.warning} warnings,{" "}
-        {diagnosticSummary.counts.info} info)
-      </p>
-    </div>
-  );
-}
-
-interface ImportTotals {
-  definitionsFiles: number;
-  managementFiles: number;
-  hosts: number;
-  vhosts: number;
-  exchanges: number;
-  queues: number;
-  bindings: number;
-  shovels: number;
-  federations: number;
-  policies: number;
-}
-
-function summarizeImportedTotals(result: ImportResult): ImportTotals {
-  const totals: ImportTotals = {
-    definitionsFiles: 0,
-    managementFiles: 0,
-    hosts: 0,
-    vhosts: 0,
-    exchanges: 0,
-    queues: 0,
-    bindings: 0,
-    shovels: 0,
-    federations: 0,
-    policies: 0,
-  };
-  const hostIds = new Set<string>();
-  for (const file of result.files) {
-    if (file.kind === "definitions") totals.definitionsFiles += 1;
-    if (file.kind === "management-dump") totals.managementFiles += 1;
-    if (file.parsed) {
-      hostIds.add(file.parsed.host.id);
-      totals.vhosts += file.parsed.vhosts.length;
-      totals.exchanges += file.parsed.exchanges.length;
-      totals.queues += file.parsed.queues.length;
-      totals.bindings += file.parsed.bindings.length;
-      totals.policies += file.parsed.policies.length;
-    }
-    if (file.runtime) {
-      totals.shovels += file.runtime.shovels.length;
-      totals.federations += file.runtime.federations.length;
-    }
-  }
-  totals.hosts = hostIds.size;
-  return totals;
 }
 
 const panelStyle: React.CSSProperties = {
