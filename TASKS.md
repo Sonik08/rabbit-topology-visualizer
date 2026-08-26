@@ -47,7 +47,7 @@ Automation rule: each 2-hour run should complete at least one unchecked task whe
 
 ## Tests and quality
 
-- [ ] Add tests for parser fixtures.
+- [x] Add tests for parser fixtures. (adds test/fixtures/minimalDefinitionsFixture.test.ts — dedicated end-to-end coverage that drives `minimal-definitions.json` through `parseDefinitionsExport → parseRuntimeParameters → buildGraph → upstreamForQueue` and asserts every shape documented in test/fixtures/README.md: no error-severity diagnostics from either parser, both vhosts (`/`, `orders`) enumerated, exchange type parsing (direct/topic/fanout) per name, `alternate-exchange` argument on `orders.in`, both queue- and exchange-destination bindings including the exchange→exchange `orders.in → orders.audit` route, dead-letter policy captured verbatim while per-queue DLX metadata stays unset (policy application is a RabbitMQ runtime concern our parser deliberately does not synthesize), runtime parameter component set exactly `{shovel, federation-upstream}`, shovel materialized with sanitized endpoints referencing `remote-host-a.example.internal`, federation-upstream materialized with a redacted uri referencing `remote-host-b.example.internal`, buildGraph emits nodes for every kind exercised by the fixture (host/vhost/exchange/queue/shovel/federation) and edges for every kind the fixture documents (`contains`/`binds`/`alternate-exchange`/`shovels`/`federates`), upstream traversal from `orders.incoming` reaches `orders.in` via a `binds` step, shovel node destination references `orders.in`, and the full node+edge JSON never contains a raw `user:pass@` AMQP userinfo pattern)
 - [ ] Add tests for topic routing matcher.
 - [ ] Add tests for queue upstream traversal.
 - [ ] Add tests for exchange upstream traversal.
