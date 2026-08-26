@@ -9,11 +9,18 @@ import ReactFlow, {
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { buildGraph } from "../../core/graph/buildGraph";
+import { applyGraphFilters } from "../../core/graph/filterGraph";
 import { computeUpstreamHighlight } from "../../core/graph/upstreamHighlight";
 import { aggregateImportedTopology } from "../../core/import";
 import type { ImportResult } from "../../core/import";
 import { EntityDetailsPanel } from "./EntityDetailsPanel";
 import { PathExplanationPanel } from "./PathExplanationPanel";
+import {
+  createEmptyFilterState,
+  toGraphFilters,
+  TopologyFiltersPanel,
+  type FilterState,
+} from "./TopologyFiltersPanel";
 import { toReactFlowElements, type FlowEdge, type FlowNode } from "./topologyGraphElements";
 
 export interface TopologyGraphCanvasProps {
@@ -41,15 +48,21 @@ export function TopologyGraphCanvas({
 }: TopologyGraphCanvasProps): JSX.Element {
   const [showContains, setShowContains] = useState(includeContains);
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
+  const [filters, setFilters] = useState<FilterState>(() => createEmptyFilterState());
 
-  const graph = useMemo(() => {
+  const rawGraph = useMemo(() => {
     const aggregated = aggregateImportedTopology(result);
     return buildGraph(aggregated);
   }, [result]);
 
+  const graph = useMemo(
+    () => applyGraphFilters(rawGraph, toGraphFilters(filters)),
+    [rawGraph, filters],
+  );
+
   const highlight = useMemo(
-    () => computeUpstreamHighlight(graph, selectedNodeId),
-    [graph, selectedNodeId],
+    () => computeUpstreamHighlight(graph, selectedNodeId, { maxDepth: filters.maxDepth }),
+    [graph, selectedNodeId, filters.maxDepth],
   );
 
   const flowGraph = useMemo(
@@ -68,8 +81,8 @@ export function TopologyGraphCanvas({
   const clearSelection = useCallback(() => setSelectedNodeId(undefined), []);
 
   const selectedNode = useMemo(
-    () => (selectedNodeId ? graph.nodes.find((n) => n.id === selectedNodeId) : undefined),
-    [graph, selectedNodeId],
+    () => (selectedNodeId ? rawGraph.nodes.find((n) => n.id === selectedNodeId) : undefined),
+    [rawGraph, selectedNodeId],
   );
 
   const selectionSummary = useMemo(() => {
@@ -105,9 +118,10 @@ export function TopologyGraphCanvas({
         </label>
       </div>
       <p style={statsLineStyle} data-testid="topology-graph-stats">
-        {flowGraph.nodes.length} nodes · {flowGraph.edges.length} edges
+        {flowGraph.nodes.length} nodes · {flowGraph.edges.length} edges (of {rawGraph.nodes.length} · {rawGraph.edges.length})
         {selectedNodeId ? " · click background or the same node again to clear selection" : " · click a queue or exchange to highlight its upstream path"}
       </p>
+      <TopologyFiltersPanel graph={rawGraph} filters={filters} onChange={setFilters} />
       {selectionSummary && (
         <div style={selectionBarStyle} data-testid="topology-graph-selection-summary">
           <span>{selectionSummary}</span>

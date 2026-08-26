@@ -5,3 +5,4 @@ export * from "./traversal";
 export * from "./crossHost";
 export * from "./cycles";
 export * from "./upstreamHighlight";
+export * from "./filterGraph";
