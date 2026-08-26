@@ -93,6 +93,96 @@ describe("toReactFlowElements", () => {
     expect(edge.data.routingKey).toBe("orders.#");
   });
 
+  it("styles exchanges by AMQP type and tags them with a subtype badge", () => {
+    const nodes: GraphNode[] = [
+      { id: "exchange:a:t", kind: "exchange", label: "orders", data: { type: "topic" } },
+      { id: "exchange:a:d", kind: "exchange", label: "logins", data: { type: "direct" } },
+      { id: "exchange:a:f", kind: "exchange", label: "broadcast", data: { type: "fanout" } },
+      { id: "exchange:a:h", kind: "exchange", label: "custom", data: { type: "headers" } },
+      { id: "exchange:a:x", kind: "exchange", label: "delayed", data: { type: "x-delayed-message" } },
+    ];
+    const byId = new Map(
+      toReactFlowElements(graph(nodes, [])).nodes.map((n) => [n.id, n]),
+    );
+    expect(byId.get("exchange:a:t")!.data.flowType).toBe("exchange:topic");
+    expect(byId.get("exchange:a:t")!.data.subtypeBadge).toBe("[topic]");
+    expect(byId.get("exchange:a:t")!.data.label).toBe("[topic] orders");
+    expect(byId.get("exchange:a:d")!.data.flowType).toBe("exchange:direct");
+    expect(byId.get("exchange:a:f")!.data.flowType).toBe("exchange:fanout");
+    expect(byId.get("exchange:a:h")!.data.flowType).toBe("exchange:headers");
+    // Unknown plugin types keep their raw name in the flow type but fall back
+    // to the neutral "other" background.
+    expect(byId.get("exchange:a:x")!.data.flowType).toBe("exchange:x-delayed-message");
+    expect(byId.get("exchange:a:x")!.data.subtypeBadge).toBe("[x-delayed-message]");
+    // Distinct exchange types should get distinct backgrounds.
+    expect(byId.get("exchange:a:t")!.style!.background).not.toBe(
+      byId.get("exchange:a:d")!.style!.background,
+    );
+  });
+
+  it("styles queues by x-queue-type and dashes the border for transient queues", () => {
+    const nodes: GraphNode[] = [
+      { id: "queue:a:c", kind: "queue", label: "orders", data: { durable: true } },
+      {
+        id: "queue:a:q",
+        kind: "queue",
+        label: "audit",
+        data: { durable: true, arguments: { "x-queue-type": "quorum" } },
+      },
+      {
+        id: "queue:a:s",
+        kind: "queue",
+        label: "events",
+        data: { durable: true, arguments: { "x-queue-type": "stream" } },
+      },
+      { id: "queue:a:t", kind: "queue", label: "ephemeral", data: { durable: false } },
+    ];
+    const byId = new Map(
+      toReactFlowElements(graph(nodes, [])).nodes.map((n) => [n.id, n]),
+    );
+    expect(byId.get("queue:a:c")!.data.flowType).toBe("queue:classic");
+    // Classic + durable → no badge, label is untouched.
+    expect(byId.get("queue:a:c")!.data.subtypeBadge).toBeUndefined();
+    expect(byId.get("queue:a:c")!.data.label).toBe("orders");
+    expect(byId.get("queue:a:q")!.data.flowType).toBe("queue:quorum");
+    expect(byId.get("queue:a:q")!.data.subtypeBadge).toBe("[quorum]");
+    expect(byId.get("queue:a:s")!.data.flowType).toBe("queue:stream");
+    // Transient queues carry a `transient` marker in the badge AND a dashed
+    // border so the visual state is unambiguous.
+    expect(byId.get("queue:a:t")!.data.subtypeBadge).toBe("[transient]");
+    expect(String(byId.get("queue:a:t")!.style!.border)).toContain("dashed");
+    expect(String(byId.get("queue:a:c")!.style!.border)).toContain("solid");
+    // Quorum + stream backgrounds should differ from classic.
+    expect(byId.get("queue:a:q")!.style!.background).not.toBe(
+      byId.get("queue:a:c")!.style!.background,
+    );
+    expect(byId.get("queue:a:s")!.style!.background).not.toBe(
+      byId.get("queue:a:c")!.style!.background,
+    );
+  });
+
+  it("emits an arrowhead marker matching the edge stroke colour for every rendered edge", () => {
+    const nodes: GraphNode[] = [
+      { id: "exchange:a:x1", kind: "exchange", label: "x1" },
+      { id: "queue:a:q1", kind: "queue", label: "q1" },
+      { id: "shovel:a:s1", kind: "shovel", label: "s1" },
+    ];
+    const edges: GraphEdge[] = [
+      { id: "b1", from: "exchange:a:x1", to: "queue:a:q1", kind: "binds" },
+      { id: "s-in", from: "exchange:a:x1", to: "shovel:a:s1", kind: "shovels" },
+    ];
+    const byId = new Map(
+      toReactFlowElements(graph(nodes, edges)).edges.map((e) => [e.id, e]),
+    );
+    expect(byId.get("b1")!.markerEnd?.type).toBe("arrowclosed");
+    expect(byId.get("b1")!.markerEnd?.color).toBe(
+      (byId.get("b1")!.style as { stroke?: string }).stroke,
+    );
+    expect(byId.get("s-in")!.markerEnd?.color).toBe(
+      (byId.get("s-in")!.style as { stroke?: string }).stroke,
+    );
+  });
+
   it("animates shovel/federation edges but not binds/routes", () => {
     const nodes: GraphNode[] = [
       { id: "exchange:a:x1", kind: "exchange", label: "x1" },
