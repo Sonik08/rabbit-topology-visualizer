@@ -52,7 +52,7 @@ Automation rule: each 2-hour run should complete at least one unchecked task whe
 - [ ] Add tests for queue upstream traversal.
 - [ ] Add tests for exchange upstream traversal.
 - [ ] Add tests for cross-host shovel traversal.
-- [ ] Add tests for federation traversal.
+- [x] Add tests for federation traversal. (adds test/core/graph/federationTraversal.test.ts — 9 focused cases exercising the `federates` edge kind end-to-end: queue-target walk reaches the upstream exchange through mirror→federates(out)→federation→federates(in)→publish; every `federates` step carries the federation link's `name` as its label; routing-key metadata on the mirror binding survives the composed path; exchange-target upstream traversal reaches the federation ancestor; dropping the upstream host produces an `external:` ancestor node whose id embeds the source hostname; two federations feeding the same downstream produce two distinct source paths; cross-vhost federation on the same host walks between two vhosts; `maxDepth=1` truncates before reaching the upstream exchange with `truncated=true`; and a pathological loop where the downstream mirror binds back to the upstream publisher forms a cycle that `findCycles` detects across the SCC spanning both exchanges + the federation node while the bounded traversal still terminates)
 - [ ] Add tests for cycle detection.
 - [ ] Add build/typecheck gate in CI-ready script.
 
