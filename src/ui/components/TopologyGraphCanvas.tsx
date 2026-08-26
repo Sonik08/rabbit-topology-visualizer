@@ -12,6 +12,7 @@ import { buildGraph } from "../../core/graph/buildGraph";
 import { computeUpstreamHighlight } from "../../core/graph/upstreamHighlight";
 import { aggregateImportedTopology } from "../../core/import";
 import type { ImportResult } from "../../core/import";
+import { EntityDetailsPanel } from "./EntityDetailsPanel";
 import { toReactFlowElements, type FlowEdge, type FlowNode } from "./topologyGraphElements";
 
 export interface TopologyGraphCanvasProps {
@@ -65,19 +66,23 @@ export function TopologyGraphCanvas({
 
   const clearSelection = useCallback(() => setSelectedNodeId(undefined), []);
 
+  const selectedNode = useMemo(
+    () => (selectedNodeId ? graph.nodes.find((n) => n.id === selectedNodeId) : undefined),
+    [graph, selectedNodeId],
+  );
+
   const selectionSummary = useMemo(() => {
     if (!selectedNodeId) return undefined;
-    const target = graph.nodes.find((n) => n.id === selectedNodeId);
-    if (!target) return `Selected: ${selectedNodeId} (not in graph)`;
-    if (target.kind !== "queue" && target.kind !== "exchange") {
-      return `Selected ${target.kind}: ${target.label} — upstream highlight only supports queues and exchanges.`;
+    if (!selectedNode) return `Selected: ${selectedNodeId} (not in graph)`;
+    if (selectedNode.kind !== "queue" && selectedNode.kind !== "exchange") {
+      return `Selected ${selectedNode.kind}: ${selectedNode.label} — upstream highlight only supports queues and exchanges.`;
     }
     const ancestorCount = highlight.nodeIds.size > 0 ? highlight.nodeIds.size - 1 : 0;
     const truncated = highlight.traversal?.truncated ? " (truncated at max depth)" : "";
-    return `Upstream of ${target.kind} '${target.label}': ${ancestorCount} ancestor${
+    return `Upstream of ${selectedNode.kind} '${selectedNode.label}': ${ancestorCount} ancestor${
       ancestorCount === 1 ? "" : "s"
     }, ${highlight.edgeIds.size} edge${highlight.edgeIds.size === 1 ? "" : "s"}${truncated}.`;
-  }, [selectedNodeId, graph, highlight]);
+  }, [selectedNodeId, selectedNode, highlight]);
 
   return (
     <section
@@ -133,6 +138,7 @@ export function TopologyGraphCanvas({
           <MiniMap pannable zoomable />
         </ReactFlow>
       </div>
+      <EntityDetailsPanel node={selectedNode} />
     </section>
   );
 }
