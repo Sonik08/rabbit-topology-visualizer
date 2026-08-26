@@ -1,6 +1,10 @@
+import { useState } from "react";
 import { ImportPanel } from "./ui/components/ImportPanel";
+import { EntitySearchBox } from "./ui/components/EntitySearchBox";
+import type { ImportResult } from "./core/import";
 
 export function App(): JSX.Element {
+  const [result, setResult] = useState<ImportResult | undefined>(undefined);
   return (
     <main style={{ fontFamily: "system-ui, sans-serif", padding: "2rem" }}>
       <h1>Rabbit Topology Visualizer</h1>
@@ -9,7 +13,8 @@ export function App(): JSX.Element {
         definitions JSON, a management-dump JSON, or a RAR/zip archive that
         wraps them.
       </p>
-      <ImportPanel />
+      <ImportPanel onImported={setResult} />
+      {result && <EntitySearchBox result={result} />}
     </main>
   );
 }
