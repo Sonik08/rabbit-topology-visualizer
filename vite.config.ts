@@ -13,7 +13,12 @@ export default defineConfig({
   },
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "test/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx", "test/**/*.test.ts", "test/**/*.test.tsx"],
     reporters: ["default"],
+    environmentMatchGlobs: [
+      // React component tests need a DOM. Everything else stays on the
+      // faster node env by default.
+      ["test/ui/**/*.test.tsx", "jsdom"],
+    ],
   },
 });
