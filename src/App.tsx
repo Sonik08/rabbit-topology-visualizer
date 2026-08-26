@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { ImportPanel } from "./ui/components/ImportPanel";
 import { EntitySearchBox } from "./ui/components/EntitySearchBox";
+import { TopologyGraphCanvas } from "./ui/components/TopologyGraphCanvas";
 import type { ImportResult } from "./core/import";
 
 export function App(): JSX.Element {
@@ -15,6 +16,7 @@ export function App(): JSX.Element {
       </p>
       <ImportPanel onImported={setResult} />
       {result && <EntitySearchBox result={result} />}
+      {result && <TopologyGraphCanvas result={result} />}
     </main>
   );
 }

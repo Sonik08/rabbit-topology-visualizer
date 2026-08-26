@@ -57,6 +57,36 @@ describe("aggregateImportedTopology", () => {
     expect(agg.queues.map((q) => q.id)).toEqual(["queue:a:q1"]);
   });
 
+  it("aggregates bindings across files and de-duplicates by id", () => {
+    const parsedA = {
+      host: { id: "host:a", name: "a", sourceFiles: [] },
+      vhosts: [{ id: "vhost:a:/", hostId: "host:a", name: "/" }],
+      exchanges: [],
+      queues: [],
+      bindings: [
+        { id: "binding:a:b1", sourceExchangeId: "exchange:a:x1", destinationId: "queue:a:q1", destinationKind: "queue", routingKey: "r1" },
+        { id: "binding:a:b2", sourceExchangeId: "exchange:a:x1", destinationId: "queue:a:q2", destinationKind: "queue", routingKey: "r2" },
+      ],
+      policies: [],
+      rawParameters: [],
+      diagnostics: [],
+    };
+    const parsedADuplicate = {
+      ...parsedA,
+      bindings: [parsedA.bindings[0]],
+    };
+    const agg = aggregateImportedTopology(
+      importResult([
+        { path: "a.json", sizeBytes: 1, kind: "definitions", parsed: parsedA as never },
+        { path: "a2.json", sizeBytes: 1, kind: "definitions", parsed: parsedADuplicate as never },
+      ]),
+    );
+    expect(agg.bindings.map((b) => b.id).sort()).toEqual([
+      "binding:a:b1",
+      "binding:a:b2",
+    ]);
+  });
+
   it("aggregates runtime shovels and federations across files", () => {
     const runtimeA = {
       shovels: [{ id: "shovel:a:s1", hostId: "host:a", vhostId: "vhost:a:/", name: "s1" }],
@@ -97,6 +127,7 @@ describe("aggregateImportedTopology", () => {
       vhosts: [],
       exchanges: [],
       queues: [],
+      bindings: [],
       shovels: [],
       federations: [],
       policies: [],

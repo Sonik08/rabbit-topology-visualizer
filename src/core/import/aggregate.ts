@@ -1,5 +1,10 @@
 import type { BuildIndexesInput } from "../graph/indexes";
+import type { Binding } from "../model";
 import type { ImportResult } from "./importArchive";
+
+export interface AggregatedTopology extends BuildIndexesInput {
+  bindings: Binding[];
+}
 
 /**
  * Flatten an `ImportResult` into a `BuildIndexesInput` — merging every
@@ -10,13 +15,14 @@ import type { ImportResult } from "./importArchive";
  * already de-dupes by id, but pre-filtering here keeps the returned arrays
  * exactly reflective of what will be indexed.
  */
-export function aggregateImportedTopology(result: ImportResult): BuildIndexesInput {
+export function aggregateImportedTopology(result: ImportResult): AggregatedTopology {
   const seen = new Set<string>();
-  const out: BuildIndexesInput = {
+  const out: AggregatedTopology = {
     hosts: [],
     vhosts: [],
     exchanges: [],
     queues: [],
+    bindings: [],
     shovels: [],
     federations: [],
     policies: [],
@@ -28,6 +34,7 @@ export function aggregateImportedTopology(result: ImportResult): BuildIndexesInp
       for (const v of file.parsed.vhosts) pushUnique(out.vhosts, v, seen, v.id);
       for (const e of file.parsed.exchanges) pushUnique(out.exchanges, e, seen, e.id);
       for (const q of file.parsed.queues) pushUnique(out.queues, q, seen, q.id);
+      for (const b of file.parsed.bindings) pushUnique(out.bindings, b, seen, b.id);
       for (const p of file.parsed.policies) pushUnique(out.policies, p, seen, p.id);
     }
     if (file.runtime) {
