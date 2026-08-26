@@ -145,7 +145,6 @@ async function importRar(
     sourceFileId: `file:${input.fileName}`,
     // Enforce the public importer limits while the RAR loader is still
     // inspecting headers, before extraction allocates decompressed entries.
-    // EntryBudget below remains a defence-in-depth check over returned data.
     maxArchiveBytes: limits.maxArchiveBytes,
     maxEntries: limits.maxEntryCount,
     maxEntryBytes: limits.maxEntryBytes,
@@ -154,11 +153,7 @@ async function importRar(
   diagnostics.push(...rar.diagnostics);
   const entries: RawJsonEntry[] = [];
   const nonJson: ImportedFile[] = [];
-  const budget = new EntryBudget(limits, diagnostics, input.fileName);
   for (const entry of rar.files) {
-    const decision = budget.admit(entry.path, entry.sizeBytes);
-    if (decision === "stop") break;
-    if (decision === "skip") continue;
     if (entry.path.toLowerCase().endsWith(".json")) {
       entries.push({ path: entry.path, sizeBytes: entry.sizeBytes, bytes: entry.data });
     } else {
@@ -193,36 +188,74 @@ async function importZip(
   }
   const entries: RawJsonEntry[] = [];
   const nonJson: ImportedFile[] = [];
-  // Keep declared-size preflight separate from actual decompressed-byte
-  // accounting. ZIP metadata is useful for refusing obvious bombs before
-  // allocation, but it is not trusted: every extracted entry is admitted
-  // again against an independent budget using its real byte length.
-  const preflightBudget = new EntryBudget(limits, diagnostics, input.fileName);
-  const actualBudget = new EntryBudget(
-    { ...limits, maxEntryCount: Number.MAX_SAFE_INTEGER },
-    diagnostics,
-    input.fileName,
-  );
-  const zipEntries = Object.values(zip.files).filter((f) => !f.dir);
-  for (const entry of zipEntries) {
-    // JSZip's public interface exposes `_data.uncompressedSize` on internal
-    // entries; when present we can pre-check the per-entry limit BEFORE
-    // decompressing (blocks zip bombs). When absent, fall back to admitting
-    // with a sentinel size and re-checking after decompression.
-    const rawSize = Number((entry as unknown as { _data?: { uncompressedSize?: number } })._data?.uncompressedSize) || 0;
-    const preflightDecision = preflightBudget.admit(entry.name, rawSize);
-    if (preflightDecision === "stop") break;
-    if (preflightDecision === "skip") continue;
+  const zipEntries = Object.values(zip.files);
+  const preflight = preflightZipEntries(zipEntries, limits, diagnostics, input.fileName);
+  if (preflight.terminal) {
+    return { archiveKind: "zip", archivePath: input.fileName, files: [], diagnostics };
+  }
 
-    const bytes = await entry.async("uint8array");
-    const actualDecision = actualBudget.admit(entry.name, bytes.byteLength);
-    if (actualDecision === "stop") break;
-    if (actualDecision === "skip") continue;
+  // This total is deliberately independent from the declared-size preflight:
+  // archive metadata is advisory and must not be added to actual output. Every
+  // chunk produced by JSZip is counted here, including chunks from entries
+  // later skipped for exceeding the per-entry cap.
+  let actualProducedBytes = 0;
+  for (const candidate of preflight.entries) {
+    if (candidate.entry.dir || candidate.skip) continue;
 
-    if (entry.name.toLowerCase().endsWith(".json")) {
-      entries.push({ path: entry.name, sizeBytes: bytes.byteLength, bytes });
+    const remainingTotalBytes = limits.maxTotalDecompressedBytes - actualProducedBytes;
+    let streamed: ZipStreamResult;
+    try {
+      streamed = await streamZipEntryBounded(
+        candidate.entry,
+        candidate.declaredSize,
+        limits.maxEntryBytes,
+        remainingTotalBytes,
+      );
+    } catch (err) {
+      diagnostics.push({
+        severity: "warning",
+        code: "zip.entry-extract-failed",
+        message: `Could not extract zip entry '${candidate.entry.name}': ${err instanceof Error ? err.message : String(err)}`,
+        sourceFileId: `file:${input.fileName}`,
+      });
+      continue;
+    }
+
+    actualProducedBytes += streamed.producedBytes;
+    if (streamed.decision === "total-exceeded") {
+      diagnostics.push({
+        severity: "error",
+        code: "import.total-size-exceeded",
+        message: `Archive '${input.fileName}' exceeded the total-decompressed-size limit (${limits.maxTotalDecompressedBytes}). Stopping iteration.`,
+        sourceFileId: `file:${input.fileName}`,
+      });
+      break;
+    }
+    if (streamed.decision === "entry-exceeded") {
+      diagnostics.push({
+        severity: "warning",
+        code: "import.entry-too-large",
+        message: `Skipped '${candidate.entry.name}' after it produced ${streamed.producedBytes} bytes; the per-entry decompressed limit is ${limits.maxEntryBytes}.`,
+        sourceFileId: `file:${input.fileName}`,
+      });
+      continue;
+    }
+    if (streamed.decision === "failed") {
+      diagnostics.push({
+        severity: "warning",
+        code: "zip.entry-extract-failed",
+        message: `Could not extract zip entry '${candidate.entry.name}': ${streamed.error instanceof Error ? streamed.error.message : String(streamed.error)}`,
+        sourceFileId: `file:${input.fileName}`,
+      });
+      continue;
+    }
+
+    const bytes = streamed.bytes;
+
+    if (candidate.entry.name.toLowerCase().endsWith(".json")) {
+      entries.push({ path: candidate.entry.name, sizeBytes: bytes.byteLength, bytes });
     } else {
-      nonJson.push({ path: entry.name, sizeBytes: bytes.byteLength, kind: "non-json" });
+      nonJson.push({ path: candidate.entry.name, sizeBytes: bytes.byteLength, kind: "non-json" });
     }
   }
   const files = processJsonEntries(entries, diagnostics);
@@ -232,6 +265,190 @@ async function importZip(
     files: [...files, ...nonJson],
     diagnostics,
   };
+}
+
+interface ZipEntryWithInternals extends JSZip.JSZipObject {
+  _data?: { uncompressedSize?: number };
+  internalStream(type: "uint8array"): ZipStreamHelper;
+}
+
+interface ZipStreamHelper {
+  on(event: "data", callback: (chunk: Uint8Array) => void): ZipStreamHelper;
+  on(event: "end", callback: () => void): ZipStreamHelper;
+  on(event: "error", callback: (error: unknown) => void): ZipStreamHelper;
+  pause(): ZipStreamHelper;
+  resume(): ZipStreamHelper;
+}
+
+interface ZipPreflightEntry {
+  entry: ZipEntryWithInternals;
+  declaredSize: number;
+  skip: boolean;
+}
+
+function preflightZipEntries(
+  zipEntries: JSZip.JSZipObject[],
+  limits: ImportLimits,
+  diagnostics: Diagnostic[],
+  archiveName: string,
+): { entries: ZipPreflightEntry[]; terminal: boolean } {
+  if (zipEntries.length > limits.maxEntryCount) {
+    diagnostics.push({
+      severity: "error",
+      code: "import.too-many-entries",
+      message: `Archive '${archiveName}' exceeded the entry-count limit (${limits.maxEntryCount}). Stopping iteration.`,
+      sourceFileId: `file:${archiveName}`,
+    });
+    return { entries: [], terminal: true };
+  }
+
+  const entries: ZipPreflightEntry[] = [];
+  let declaredTotalBytes = 0;
+  for (const rawEntry of zipEntries) {
+    const entry = rawEntry as ZipEntryWithInternals;
+    const declaredSize = safeZipSize(entry._data?.uncompressedSize);
+    if (!entry.dir) declaredTotalBytes += declaredSize;
+    if (declaredTotalBytes > limits.maxTotalDecompressedBytes) {
+      diagnostics.push({
+        severity: "error",
+        code: "import.total-size-exceeded",
+        message: `Archive '${archiveName}' reports more than the total-decompressed-size limit (${limits.maxTotalDecompressedBytes}). Refusing to extract it.`,
+        sourceFileId: `file:${archiveName}`,
+      });
+      return { entries: [], terminal: true };
+    }
+
+    const skip = !entry.dir && declaredSize > limits.maxEntryBytes;
+    if (skip) {
+      diagnostics.push({
+        severity: "warning",
+        code: "import.entry-too-large",
+        message: `Skipped '${entry.name}' (${declaredSize} declared bytes); the per-entry decompressed limit is ${limits.maxEntryBytes}.`,
+        sourceFileId: `file:${archiveName}`,
+      });
+    }
+    entries.push({ entry, declaredSize, skip });
+  }
+  return { entries, terminal: false };
+}
+
+function safeZipSize(value: number | undefined): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0
+    ? Math.floor(value)
+    : 0;
+}
+
+type ZipStreamResult =
+  | { decision: "complete"; producedBytes: number; bytes: Uint8Array }
+  | { decision: "failed"; producedBytes: number; error: unknown }
+  | { decision: "entry-exceeded"; producedBytes: number }
+  | { decision: "total-exceeded"; producedBytes: number };
+
+/**
+ * Decompress one JSZip entry chunk-by-chunk. The backing buffer is never
+ * larger than the trustworthy declared size bounded by both configured caps;
+ * JSZip may hand us one additional chunk, but that chunk is not retained once
+ * either limit is crossed. Pausing the helper stops further inflate work.
+ */
+function streamZipEntryBounded(
+  entry: ZipEntryWithInternals,
+  declaredSize: number,
+  maxEntryBytes: number,
+  remainingTotalBytes: number,
+): Promise<ZipStreamResult> {
+  return new Promise((resolve) => {
+    const capacity = Math.min(declaredSize, maxEntryBytes, remainingTotalBytes);
+    const output = new Uint8Array(Math.max(0, capacity));
+    const stream = entry.internalStream("uint8array");
+    let producedBytes = 0;
+    let settled = false;
+    let materializable = true;
+    let pendingLimitDecision: "entry-exceeded" | "total-exceeded" | undefined;
+    let limitResolutionScheduled = false;
+
+    const finish = (result: ZipStreamResult): void => {
+      if (settled) return;
+      settled = true;
+      stream.pause();
+      resolve(result);
+    };
+
+    const stopAtLimit = (decision: "entry-exceeded" | "total-exceeded"): void => {
+      // Pako may synchronously emit several output chunks for the compressed
+      // input chunk already in flight. Pause now, keep counting those chunks,
+      // and resolve in a microtask after that synchronous work unwinds.
+      if (decision === "total-exceeded" || !pendingLimitDecision) {
+        pendingLimitDecision = decision;
+      }
+      stream.pause();
+      if (limitResolutionScheduled) return;
+      limitResolutionScheduled = true;
+      queueMicrotask(() => {
+        if (!settled && pendingLimitDecision) {
+          finish({ decision: pendingLimitDecision, producedBytes });
+        }
+      });
+    };
+
+    stream
+      .on("data", (chunk) => {
+        if (settled) return;
+        const chunkStart = producedBytes;
+        producedBytes += chunk.byteLength;
+
+        if (producedBytes > remainingTotalBytes) {
+          stopAtLimit("total-exceeded");
+          return;
+        }
+        if (producedBytes > maxEntryBytes) {
+          stopAtLimit("entry-exceeded");
+          return;
+        }
+
+        if (materializable && producedBytes <= output.byteLength) {
+          output.set(chunk, chunkStart);
+        } else {
+          // A declared-size mismatch cannot be safely grown without exceeding
+          // the configured retained-memory bound. JSZip will report the corrupt
+          // size at end; meanwhile continue counting output toward both caps.
+          materializable = false;
+        }
+      })
+      .on("error", (error) => {
+        if (settled) return;
+        settled = true;
+        resolve({ decision: "failed", producedBytes, error });
+      })
+      .on("end", () => {
+        if (settled) return;
+        // A pending limit decision beats any success/failure path: if a chunk
+        // pushed `producedBytes` past a cap and stream `end` fires synchronously
+        // before the microtask-scheduled `stopAtLimit` resolution runs, the
+        // caller must still see the terminal limit diagnostic — not a partial
+        // `complete` payload nor a generic "exceeded declared size" failure.
+        if (pendingLimitDecision) {
+          settled = true;
+          resolve({ decision: pendingLimitDecision, producedBytes });
+          return;
+        }
+        if (!materializable) {
+          settled = true;
+          resolve({
+            decision: "failed",
+            producedBytes,
+            error: new Error("decompressed data exceeded its declared size"),
+          });
+          return;
+        }
+        settled = true;
+        resolve({
+          decision: "complete",
+          producedBytes,
+          bytes: output.subarray(0, producedBytes),
+        });
+      })
+      .resume();
+  });
 }
 
 function importSingleJson(
@@ -258,72 +475,6 @@ function importSingleJson(
     files,
     diagnostics,
   };
-}
-
-/**
- * Enforces per-entry, per-count, and total-decompressed-size limits during
- * archive iteration. `admit(path, size)` returns a tri-state so callers can
- * distinguish "keep this entry" from "skip this entry, keep iterating" from
- * "hit a terminal budget, stop iterating".
- *
- *   - `"admit"` — the entry is within all limits; include it.
- *   - `"skip"`  — this entry alone violates `maxEntryBytes`; drop it but keep
- *                 processing later entries (they may be smaller and valid).
- *   - `"stop"`  — a terminal budget was breached (`maxEntryCount` or
- *                 `maxTotalDecompressedBytes`); the caller must `break` and
- *                 stop scanning further entries.
- *
- * One diagnostic is emitted per breach.
- */
-export type EntryBudgetDecision = "admit" | "skip" | "stop";
-
-class EntryBudget {
-  private entryCount = 0;
-  private totalBytes = 0;
-  private stopped = false;
-
-  constructor(
-    private readonly limits: ImportLimits,
-    private readonly diagnostics: Diagnostic[],
-    private readonly archiveName: string,
-  ) {}
-
-  admit(path: string, sizeBytes: number): EntryBudgetDecision {
-    if (this.stopped) return "stop";
-    if (this.entryCount >= this.limits.maxEntryCount) {
-      this.diagnostics.push({
-        severity: "error",
-        code: "import.too-many-entries",
-        message: `Archive '${this.archiveName}' exceeded the entry-count limit (${this.limits.maxEntryCount}). Stopping iteration.`,
-        sourceFileId: `file:${this.archiveName}`,
-      });
-      this.stopped = true;
-      return "stop";
-    }
-    if (sizeBytes > this.limits.maxEntryBytes) {
-      this.diagnostics.push({
-        severity: "warning",
-        code: "import.entry-too-large",
-        message: `Skipped '${path}' (${sizeBytes} bytes); the per-entry decompressed limit is ${this.limits.maxEntryBytes}.`,
-        sourceFileId: `file:${this.archiveName}`,
-      });
-      this.entryCount += 1;
-      return "skip";
-    }
-    if (this.totalBytes + sizeBytes > this.limits.maxTotalDecompressedBytes) {
-      this.diagnostics.push({
-        severity: "error",
-        code: "import.total-size-exceeded",
-        message: `Archive '${this.archiveName}' exceeded the total-decompressed-size limit (${this.limits.maxTotalDecompressedBytes}). Stopping iteration.`,
-        sourceFileId: `file:${this.archiveName}`,
-      });
-      this.stopped = true;
-      return "stop";
-    }
-    this.entryCount += 1;
-    this.totalBytes += sizeBytes;
-    return "admit";
-  }
 }
 
 type SplitShape = "queues" | "exchanges" | "bindings" | "parameters" | "policies" | "vhosts";

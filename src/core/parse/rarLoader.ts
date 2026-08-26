@@ -5,7 +5,7 @@ import type { Diagnostic } from "../model/topology";
 export interface RarEntry {
   /** Relative path inside the archive. */
   path: string;
-  /** Uncompressed size in bytes, as reported by the archive header. */
+  /** Actual extracted size in bytes. */
   sizeBytes: number;
   /** Raw file contents. */
   data: Uint8Array;
@@ -85,18 +85,27 @@ export async function loadRarArchive(input: LoadRarInput): Promise<LoadRarResult
     return { files, diagnostics };
   }
 
-  if (!validateLimits(allHeaders, limits, input.sourceFileId, diagnostics)) {
+  if (!validateTerminalLimits(allHeaders, limits, input.sourceFileId, diagnostics)) {
     return { files, diagnostics };
   }
 
-  if (selectedHeaders.length === 0) {
+  const extractableHeaders = excludeHeaderOversizedEntries(
+    selectedHeaders,
+    limits,
+    input.sourceFileId,
+    diagnostics,
+  );
+
+  if (extractableHeaders.length === 0) {
     return { files, diagnostics };
   }
 
   let extraction;
   try {
     extraction = extractor.extract({
-      files: selectedHeaders.map((header) => header.name),
+      // node-unrar-js can materialize every selected file in one extraction
+      // call, so exclude declared-oversized entries before invoking it.
+      files: extractableHeaders.map((header) => header.name),
       password: input.password,
     });
   } catch (err) {
@@ -133,15 +142,6 @@ export async function loadRarArchive(input: LoadRarInput): Promise<LoadRarResult
         });
         continue;
       }
-      if (data.byteLength > limits.maxEntryBytes) {
-        diagnostics.push({
-          severity: "error",
-          code: "rar.entry-too-large",
-          message: `Entry '${header.name}' extracted to ${data.byteLength} bytes, exceeding the configured ${limits.maxEntryBytes} byte limit.`,
-          sourceFileId: input.sourceFileId,
-        });
-        break;
-      }
       totalBytes += data.byteLength;
       if (totalBytes > limits.maxTotalBytes) {
         diagnostics.push({
@@ -150,11 +150,26 @@ export async function loadRarArchive(input: LoadRarInput): Promise<LoadRarResult
           message: `RAR extraction exceeded the configured ${limits.maxTotalBytes} byte total limit.`,
           sourceFileId: input.sourceFileId,
         });
+        // Explicit: on a terminal cumulative-size breach the caller must not
+        // receive a partial file list. The trailing `if (diagnostics.some(err))`
+        // block below clears `files` too, but doing it here as well makes the
+        // invariant local to the failure site and immune to any refactor that
+        // later removes the trailing guard.
+        files.length = 0;
         break;
+      }
+      if (data.byteLength > limits.maxEntryBytes) {
+        diagnostics.push({
+          severity: "warning",
+          code: "rar.entry-too-large",
+          message: `Skipping entry '${header.name}': it extracted to ${data.byteLength} bytes, exceeding the configured ${limits.maxEntryBytes} byte limit.`,
+          sourceFileId: input.sourceFileId,
+        });
+        continue;
       }
       files.push({
         path: header.name,
-        sizeBytes: header.unpSize,
+        sizeBytes: data.byteLength,
         data,
       });
     }
@@ -291,7 +306,7 @@ function isSafeRelativePath(path: string): boolean {
     .some((part) => part === ".." || part.length === 0);
 }
 
-function validateLimits(
+function validateTerminalLimits(
   headers: FileHeader[],
   limits: RarLimits,
   sourceFileId: string | undefined,
@@ -310,15 +325,6 @@ function validateLimits(
   let totalBytes = 0;
   for (const header of headers) {
     const entrySize = safeSize(header.unpSize);
-    if (entrySize > limits.maxEntryBytes) {
-      diagnostics.push({
-        severity: "error",
-        code: "rar.entry-too-large",
-        message: `Entry '${header.name}' reports ${entrySize} uncompressed bytes, exceeding the configured ${limits.maxEntryBytes} byte limit.`,
-        sourceFileId,
-      });
-      return false;
-    }
     totalBytes += entrySize;
     if (totalBytes > limits.maxTotalBytes) {
       diagnostics.push({
@@ -331,6 +337,29 @@ function validateLimits(
     }
   }
   return true;
+}
+
+function excludeHeaderOversizedEntries(
+  headers: FileHeader[],
+  limits: RarLimits,
+  sourceFileId: string | undefined,
+  diagnostics: Diagnostic[],
+): FileHeader[] {
+  const extractable: FileHeader[] = [];
+  for (const header of headers) {
+    const entrySize = safeSize(header.unpSize);
+    if (entrySize > limits.maxEntryBytes) {
+      diagnostics.push({
+        severity: "warning",
+        code: "rar.entry-too-large",
+        message: `Skipping entry '${header.name}': it reports ${entrySize} uncompressed bytes, exceeding the configured ${limits.maxEntryBytes} byte limit.`,
+        sourceFileId,
+      });
+      continue;
+    }
+    extractable.push(header);
+  }
+  return extractable;
 }
 
 function safeSize(value: number): number {

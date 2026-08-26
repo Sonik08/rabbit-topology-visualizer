@@ -75,7 +75,7 @@ describe("importTopologyArchive — rar archive", () => {
     for (const f of r.files) expect(f.kind).toBe("non-json");
   });
 
-  it("passes the importer per-entry limit into RAR preflight", async () => {
+  it("passes the importer per-entry limit into RAR preflight without dropping valid entries", async () => {
     const rarBytes = readFileSync(rarFixturePath);
     const r = await importTopologyArchive({
       fileName: "FolderTest.rar",
@@ -83,8 +83,12 @@ describe("importTopologyArchive — rar archive", () => {
       limits: { maxEntryBytes: 1024 },
     });
 
-    expect(r.files).toEqual([]);
-    expect(r.diagnostics.some((d) => d.code === "rar.entry-too-large")).toBe(true);
+    expect(r.files.map((f) => f.path)).toEqual(["Folder1/Folder 中文/2中文.txt"]);
+    expect(
+      r.diagnostics.some(
+        (d) => d.code === "rar.entry-too-large" && d.severity === "warning",
+      ),
+    ).toBe(true);
     expect(r.diagnostics.some((d) => d.code === "import.entry-too-large")).toBe(false);
   });
 
@@ -407,82 +411,57 @@ describe("importTopologyArchive — resource limits", () => {
     ).toBe(false);
   });
 
-  it("catches an entry whose decompressed bytes exceed maxEntryBytes even when metadata under-reports", async () => {
-    // Adversarial: mock JSZip.loadAsync to return an entry whose
-    // `_data.uncompressedSize` claims 10 bytes while `entry.async()`
-    // actually yields 4 KB. If the importer trusted the metadata, this
-    // would slip past a `maxEntryBytes: 1024` cap. The post-decompression
-    // `actualBudget` check must catch it.
-    const actualBytes = new Uint8Array(4096);
-    // Fill with valid JSON just in case something downstream tries to parse it.
-    const jsonText = JSON.stringify({ vhosts: [], filler: "x".repeat(3900) });
-    actualBytes.set(new TextEncoder().encode(jsonText));
-    const rigged = {
-      files: {
-        "bomb.json": {
-          dir: false,
-          name: "bomb.json",
-          _data: { uncompressedSize: 10 }, // lies — actual is 4096
-          async: async (_type: string): Promise<Uint8Array> => actualBytes,
-        },
-      },
-    };
-    const spy = vi
-      .spyOn(JSZip, "loadAsync")
-      .mockResolvedValueOnce(rigged as unknown as JSZip);
+  it("streams a forged-understated entry to the per-entry cap, then imports a valid entry", async () => {
+    const source = new JSZip();
+    source.file("bomb.json", JSON.stringify({ filler: "x".repeat(40_000) }));
+    source.file("valid.definitions.json", JSON.stringify({ vhosts: [] }));
+    const bytes = await source.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+    const loaded = await JSZip.loadAsync(bytes);
+    const bomb = loaded.file("bomb.json")!;
+    (bomb as unknown as { _data: { uncompressedSize: number } })._data.uncompressedSize = 10;
+    const asyncSpy = vi.spyOn(bomb, "async");
+    const loadSpy = vi.spyOn(JSZip, "loadAsync").mockResolvedValueOnce(loaded);
     try {
       const r = await importTopologyArchive({
         fileName: "bomb.zip",
-        bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0]), // magic bytes → sniffs as zip
+        bytes,
         limits: { maxEntryBytes: 1024 },
       });
-      // Actual-size check must fire — the entry-too-large diagnostic must
-      // reference the actual byte count, not the fabricated metadata.
       expect(
         r.diagnostics.some(
           (d) => d.code === "import.entry-too-large" && d.severity === "warning",
         ),
       ).toBe(true);
-      // The rigged entry must NOT appear in the successfully-parsed files —
-      // it was rejected by the actual-byte check after decompression.
-      expect(r.files.every((f) => f.kind !== "definitions")).toBe(true);
+      expect(r.files.map((f) => f.path)).toEqual(["valid.definitions.json"]);
+      expect(asyncSpy).not.toHaveBeenCalled();
     } finally {
-      spy.mockRestore();
+      loadSpy.mockRestore();
     }
   });
 
-  it("catches cumulative decompressed size when per-entry metadata under-reports totals", async () => {
-    // Two entries each claim 10 bytes in metadata but actually decompress
-    // to 4 KB apiece. A `maxTotalDecompressedBytes: 5000` cap must stop
-    // iteration after the actual bytes accumulate past the cap.
-    const bigBytes = new Uint8Array(4096);
-    bigBytes.set(new TextEncoder().encode(JSON.stringify({ filler: "x".repeat(3900) })));
-    const makeLyingEntry = (name: string) => ({
-      dir: false,
-      name,
-      _data: { uncompressedSize: 10 },
-      async: async (_t: string): Promise<Uint8Array> => bigBytes,
-    });
-    const rigged = {
-      files: {
-        "a.json": makeLyingEntry("a.json"),
-        "b.json": makeLyingEntry("b.json"),
-      },
-    };
-    const spy = vi
-      .spyOn(JSZip, "loadAsync")
-      .mockResolvedValueOnce(rigged as unknown as JSZip);
+  it("counts output from repeatedly skipped forged entries toward the terminal total cap", async () => {
+    const source = new JSZip();
+    for (let i = 0; i < 3; i += 1) {
+      source.file(`bomb-${i}.json`, JSON.stringify({ filler: String(i).repeat(40_000) }));
+    }
+    const bytes = await source.generateAsync({ type: "uint8array", compression: "DEFLATE" });
+    const loaded = await JSZip.loadAsync(bytes);
+    for (let i = 0; i < 3; i += 1) {
+      const entry = loaded.file(`bomb-${i}.json`)!;
+      (entry as unknown as { _data: { uncompressedSize: number } })._data.uncompressedSize = 10;
+    }
+    const loadSpy = vi.spyOn(JSZip, "loadAsync").mockResolvedValueOnce(loaded);
     try {
       const r = await importTopologyArchive({
-        fileName: "cumulative-bomb.zip",
-        bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0]),
-        limits: { maxTotalDecompressedBytes: 5000 },
+        fileName: "repeated-bombs.zip",
+        bytes,
+        limits: { maxEntryBytes: 1024, maxTotalDecompressedBytes: 100_000 },
       });
-      expect(
-        r.diagnostics.some((d) => d.code === "import.total-size-exceeded"),
-      ).toBe(true);
+      expect(r.diagnostics.filter((d) => d.code === "import.entry-too-large")).toHaveLength(2);
+      expect(r.diagnostics.some((d) => d.code === "import.total-size-exceeded")).toBe(true);
+      expect(r.files).toEqual([]);
     } finally {
-      spy.mockRestore();
+      loadSpy.mockRestore();
     }
   });
 
@@ -516,70 +495,6 @@ describe("importTopologyArchive — resource limits", () => {
     expect(r.files[0]?.kind).toBe("definitions");
   });
 
-  it("rejects an entry when ZIP metadata understates its actual size", async () => {
-    const oversized = new TextEncoder().encode(
-      JSON.stringify({ filler: "x".repeat(4096) }),
-    );
-    const valid = new TextEncoder().encode(JSON.stringify({ vhosts: [] }));
-    const fakeZip = {
-      files: {
-        "forged.json": {
-          name: "forged.json",
-          dir: false,
-          _data: { uncompressedSize: 1 },
-          async: async () => oversized,
-        },
-        "valid.definitions.json": {
-          name: "valid.definitions.json",
-          dir: false,
-          _data: { uncompressedSize: 1 },
-          async: async () => valid,
-        },
-      },
-    };
-    vi.spyOn(JSZip, "loadAsync").mockResolvedValueOnce(fakeZip as unknown as JSZip);
-
-    const r = await importTopologyArchive({
-      fileName: "forged-metadata.zip",
-      bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
-      limits: { maxEntryBytes: 1024 },
-    });
-
-    expect(r.diagnostics.some((d) => d.code === "import.entry-too-large")).toBe(true);
-    expect(r.files.map((f) => f.path)).toEqual(["valid.definitions.json"]);
-  });
-
-  it("uses actual bytes for cumulative limits when ZIP metadata is understated", async () => {
-    const first = new TextEncoder().encode(JSON.stringify({ filler: "a".repeat(600) }));
-    const second = new TextEncoder().encode(JSON.stringify({ filler: "b".repeat(600) }));
-    const fakeZip = {
-      files: {
-        "first.json": {
-          name: "first.json",
-          dir: false,
-          _data: { uncompressedSize: 1 },
-          async: async () => first,
-        },
-        "second.json": {
-          name: "second.json",
-          dir: false,
-          _data: { uncompressedSize: 1 },
-          async: async () => second,
-        },
-      },
-    };
-    vi.spyOn(JSZip, "loadAsync").mockResolvedValueOnce(fakeZip as unknown as JSZip);
-
-    const r = await importTopologyArchive({
-      fileName: "forged-total.zip",
-      bytes: new Uint8Array([0x50, 0x4b, 0x03, 0x04]),
-      limits: { maxTotalDecompressedBytes: 1000 },
-    });
-
-    expect(r.diagnostics.some((d) => d.code === "import.total-size-exceeded")).toBe(true);
-    expect(r.files.map((f) => f.path)).toEqual(["first.json"]);
-  });
-
   it("stops iterating when total decompressed size exceeds maxTotalDecompressedBytes", async () => {
     const zip = new JSZip();
     for (let i = 0; i < 5; i += 1) {
@@ -593,6 +508,95 @@ describe("importTopologyArchive — resource limits", () => {
       limits: { maxTotalDecompressedBytes: 5000 },
     });
     expect(r.diagnostics.some((d) => d.code === "import.total-size-exceeded")).toBe(true);
+  });
+
+  it("resolves the pending limit decision when JSZip emits `end` synchronously after an oversized chunk", async () => {
+    // Regression: `stopAtLimit()` schedules resolution via `queueMicrotask`.
+    // If the JSZip helper emits `end` *before* that microtask runs, the `end`
+    // handler must respect `pendingLimitDecision` — otherwise it would resolve
+    // `"complete"` with a truncated payload and lose the terminal diagnostic.
+    // We can't force this scheduling with the real JSZip pipeline (pako defers
+    // to Promise ticks), so we replace `internalStream` on one entry with a
+    // rig that emits a giant chunk followed synchronously by `end`.
+    const source = new JSZip();
+    source.file("bomb.json", JSON.stringify({ filler: "x".repeat(2_000) }));
+    source.file("valid.definitions.json", JSON.stringify({ vhosts: [] }));
+    const bytes = await source.generateAsync({ type: "uint8array", compression: "STORE" });
+    const loaded = await JSZip.loadAsync(bytes);
+    const bomb = loaded.file("bomb.json")!;
+    // Understate the declared size so preflight admits both entries.
+    (bomb as unknown as { _data: { uncompressedSize: number } })._data.uncompressedSize = 16;
+
+    // Rig internalStream to fire `data` (oversized) then `end` synchronously
+    // in the same tick that `resume()` is invoked — no microtask boundary
+    // between them.
+    const rig = {
+      _dataCbs: [] as Array<(chunk: Uint8Array) => void>,
+      _endCbs: [] as Array<() => void>,
+      _errorCbs: [] as Array<(err: unknown) => void>,
+      on(event: string, cb: (...args: never[]) => void): typeof rig {
+        if (event === "data") rig._dataCbs.push(cb as (chunk: Uint8Array) => void);
+        else if (event === "end") rig._endCbs.push(cb as () => void);
+        else if (event === "error") rig._errorCbs.push(cb as (err: unknown) => void);
+        return rig;
+      },
+      pause() { return rig; },
+      resume() {
+        // Emit one chunk that already crosses both caps, THEN synchronously
+        // emit `end` in the same call stack. If `end` were to run its
+        // "complete" branch, it would fire before the queued microtask.
+        for (const cb of rig._dataCbs) cb(new Uint8Array(50_000));
+        for (const cb of rig._endCbs) cb();
+        return rig;
+      },
+    };
+    (bomb as unknown as { internalStream: () => typeof rig }).internalStream = () => rig;
+
+    const loadSpy = vi.spyOn(JSZip, "loadAsync").mockResolvedValueOnce(loaded);
+    try {
+      const r = await importTopologyArchive({
+        fileName: "sync-end.zip",
+        bytes,
+        // Small enough that the 50 KB emit crosses both entry and total caps.
+        limits: { maxEntryBytes: 1024, maxTotalDecompressedBytes: 200_000 },
+      });
+
+      // The pending limit decision must have won: no truncated `bomb.json`
+      // payload leaked through as a complete import.
+      expect(r.files.some((f) => f.path === "bomb.json")).toBe(false);
+      // The per-entry limit trip is preserved as a warning; iteration continues.
+      expect(
+        r.diagnostics.some(
+          (d) => d.code === "import.entry-too-large" && d.severity === "warning",
+        ),
+      ).toBe(true);
+      // The later valid entry still imports — proves the sync-end resolution
+      // returned "entry-exceeded" (skip + continue), not "complete" (append).
+      expect(r.files.some((f) => f.path === "valid.definitions.json")).toBe(true);
+    } finally {
+      loadSpy.mockRestore();
+    }
+  });
+
+  it("does not add declared preflight bytes to the independently counted actual total", async () => {
+    const zip = new JSZip();
+    const first = JSON.stringify({ filler: "a".repeat(600) });
+    const second = JSON.stringify({ filler: "b".repeat(600) });
+    zip.file("first.json", first);
+    zip.file("second.json", second);
+    const actualTotal = new TextEncoder().encode(first).byteLength
+      + new TextEncoder().encode(second).byteLength;
+    const bytes = await zip.generateAsync({ type: "uint8array" });
+
+    const r = await importTopologyArchive({
+      fileName: "independent-budgets.zip",
+      bytes,
+      // Above one actual/declaration total, but well below their doubled sum.
+      limits: { maxTotalDecompressedBytes: actualTotal + 1 },
+    });
+
+    expect(r.diagnostics.some((d) => d.code === "import.total-size-exceeded")).toBe(false);
+    expect(r.files.map((f) => f.path).sort()).toEqual(["first.json", "second.json"]);
   });
 
   it("rejects a single JSON file whose byte size exceeds maxEntryBytes", async () => {
@@ -609,22 +613,21 @@ describe("importTopologyArchive — resource limits", () => {
   });
 });
 
-describe("importTopologyArchive — RAR limits enforced BEFORE extraction", () => {
-  it("propagates maxEntryBytes to the RAR loader so oversized entries never decompress", async () => {
+describe("importTopologyArchive — RAR limits", () => {
+  it("propagates maxEntryBytes so header-oversized files are excluded before extraction", async () => {
     const rarBytes = readFileSync(rarFixturePath);
-    // The FolderTest.rar fixture contains entries far larger than 50 bytes;
-    // this cap must trip the RAR loader's own preflight
-    // (`rar.entry-too-large`), NOT the outer EntryBudget which only sees
-    // already-decompressed data.
     const r = await importTopologyArchive({
       fileName: "FolderTest.rar",
       bytes: new Uint8Array(rarBytes),
       limits: { maxEntryBytes: 50 },
     });
     expect(r.archiveKind).toBe("rar");
-    expect(r.diagnostics.some((d) => d.code === "rar.entry-too-large")).toBe(true);
-    // Preflight rejects the archive → no file made it through decompression.
-    expect(r.files.every((f) => f.kind !== "management-dump" && f.kind !== "definitions")).toBe(true);
+    expect(
+      r.diagnostics.some(
+        (d) => d.code === "rar.entry-too-large" && d.severity === "warning",
+      ),
+    ).toBe(true);
+    expect(r.files.map((f) => f.path)).toEqual(["Folder1/Folder 中文/2中文.txt"]);
   });
 
   it("propagates maxTotalDecompressedBytes so a cumulative size cap trips before extraction", async () => {
@@ -632,8 +635,8 @@ describe("importTopologyArchive — RAR limits enforced BEFORE extraction", () =
     const r = await importTopologyArchive({
       fileName: "FolderTest.rar",
       bytes: new Uint8Array(rarBytes),
-      // Total decompressed size of the fixture is a few KB; 100 bytes total
-      // guarantees the preflight sum exceeds the cap.
+      // The fixture includes a ~1 MiB file; 100 bytes guarantees terminal
+      // declared-total preflight before node-unrar-js extraction.
       limits: { maxTotalDecompressedBytes: 100 },
     });
     expect(

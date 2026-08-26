@@ -95,15 +95,19 @@ describe("loadRarArchive — error paths", () => {
     expect(diagnostics.some((d) => d.code === "rar.entry-limit-exceeded")).toBe(true);
   });
 
-  it("rejects entries whose reported uncompressed size exceeds the per-entry limit", async () => {
+  it("skips a selected header-oversized entry and still extracts a later valid entry", async () => {
     const bytes = readFileSync(folderTestRar);
     const { files, diagnostics } = await loadRarArchive({
       bytes,
       maxEntryBytes: 1024,
-      filter: (path) => path.endsWith(".definitely-not-real"),
     });
-    expect(files).toEqual([]);
-    expect(diagnostics.some((d) => d.code === "rar.entry-too-large")).toBe(true);
+    expect(files.map((file) => file.path)).toEqual(["Folder1/Folder 中文/2中文.txt"]);
+    expect(files[0]?.sizeBytes).toBe(files[0]?.data.byteLength);
+    expect(
+      diagnostics.some(
+        (d) => d.code === "rar.entry-too-large" && d.severity === "warning",
+      ),
+    ).toBe(true);
   });
 
   it("rejects archives whose reported total uncompressed size exceeds the total limit", async () => {
