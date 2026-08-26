@@ -24,6 +24,17 @@ export interface FlowNodeData {
   flowType: NodeFlowType;
   /** Short badge shown inline before the label (e.g. `[topic]`, `[quorum]`). */
   subtypeBadge?: string;
+  /** Highlight role in the current selection, if any. */
+  highlightState?: "target" | "on-path" | "off-path";
+}
+
+export interface UpstreamHighlightInput {
+  /** Node ids that participate in the upstream ancestry (includes the target). */
+  nodeIds: Set<string>;
+  /** Edge ids that form the reverse path back to the target. */
+  edgeIds: Set<string>;
+  /** The selected node id; rendered with a stronger outline. */
+  targetNodeId?: string;
 }
 
 export interface FlowNode {
@@ -144,11 +155,13 @@ const EDGE_STYLES: Record<GraphEdge["kind"], React.CSSProperties> = {
  */
 export function toReactFlowElements(
   graph: BuildGraphResult,
-  options: { includeContains?: boolean } = {},
+  options: { includeContains?: boolean; highlight?: UpstreamHighlightInput } = {},
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
-  const positionedNodes = layoutNodes(graph.nodes);
+  const positionedNodes = layoutNodes(graph.nodes, options.highlight);
   const flowEdges: FlowEdge[] = [];
   const nodeIds = new Set(graph.nodes.map((n) => n.id));
+  const highlight = options.highlight;
+  const highlightActive = highlight !== undefined && highlight.nodeIds.size > 0;
   for (const edge of graph.edges) {
     if (!options.includeContains && edge.kind === "contains") continue;
     // Drop edges whose endpoints aren't present as nodes — these can occur when
@@ -156,22 +169,39 @@ export function toReactFlowElements(
     // dropping keeps React Flow from throwing on unresolved handles.
     if (!nodeIds.has(edge.from) || !nodeIds.has(edge.to)) continue;
     const color = EDGE_COLORS[edge.kind];
+    const baseStyle = EDGE_STYLES[edge.kind];
+    const onPath = highlightActive && highlight!.edgeIds.has(edge.id);
+    const style: React.CSSProperties = highlightActive
+      ? onPath
+        ? { ...baseStyle, strokeWidth: Number(baseStyle.strokeWidth ?? 1.5) + 1 }
+        : { ...baseStyle, opacity: 0.15 }
+      : baseStyle;
     flowEdges.push({
       id: edge.id,
       source: edge.from,
       target: edge.to,
       label: edgeLabel(edge),
       data: { kind: edge.kind, routingKey: edge.routingKey },
-      style: EDGE_STYLES[edge.kind],
-      labelStyle: { fontSize: 10, fill: "#333" },
+      style,
+      labelStyle: highlightActive && !onPath
+        ? { fontSize: 10, fill: "#333", opacity: 0.15 }
+        : { fontSize: 10, fill: "#333" },
       animated: edge.kind === "shovels" || edge.kind === "federates",
-      markerEnd: { type: "arrowclosed", color, width: 16, height: 16 },
+      markerEnd: {
+        type: "arrowclosed",
+        color,
+        width: 16,
+        height: 16,
+      },
     });
   }
   return { nodes: positionedNodes, edges: flowEdges };
 }
 
-function layoutNodes(nodes: GraphNode[]): FlowNode[] {
+function layoutNodes(
+  nodes: GraphNode[],
+  highlight: UpstreamHighlightInput | undefined,
+): FlowNode[] {
   const byKind = new Map<GraphNodeKind, GraphNode[]>();
   for (const kind of COLUMN_ORDER) byKind.set(kind, []);
   for (const node of nodes) {
@@ -179,6 +209,7 @@ function layoutNodes(nodes: GraphNode[]): FlowNode[] {
     if (bucket) bucket.push(node);
     else byKind.set(node.kind, [node]);
   }
+  const highlightActive = highlight !== undefined && highlight.nodeIds.size > 0;
   const out: FlowNode[] = [];
   let columnIndex = 0;
   for (const kind of COLUMN_ORDER) {
@@ -188,8 +219,28 @@ function layoutNodes(nodes: GraphNode[]): FlowNode[] {
       continue;
     }
     bucket.forEach((node, rowIndex) => {
-      const { style, flowType, subtypeBadge } = resolveNodeStyle(node);
+      const { style: baseStyle, flowType, subtypeBadge } = resolveNodeStyle(node);
       const displayLabel = subtypeBadge ? `${subtypeBadge} ${node.label}` : node.label;
+      let highlightState: FlowNodeData["highlightState"];
+      let style: React.CSSProperties = { ...baseStyle };
+      if (highlightActive) {
+        const isTarget = highlight!.targetNodeId === node.id;
+        const isOnPath = highlight!.nodeIds.has(node.id);
+        if (isTarget) {
+          highlightState = "target";
+          style = {
+            ...style,
+            boxShadow: "0 0 0 3px #f4c542",
+            fontWeight: 600,
+          };
+        } else if (isOnPath) {
+          highlightState = "on-path";
+          style = { ...style, boxShadow: "0 0 0 2px #f7d977" };
+        } else {
+          highlightState = "off-path";
+          style = { ...style, opacity: 0.2 };
+        }
+      }
       out.push({
         id: node.id,
         position: {
@@ -201,6 +252,7 @@ function layoutNodes(nodes: GraphNode[]): FlowNode[] {
           kind: node.kind,
           flowType,
           subtypeBadge,
+          highlightState,
         },
         type: "default",
         style: {

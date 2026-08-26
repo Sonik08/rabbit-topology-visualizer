@@ -183,6 +183,60 @@ describe("toReactFlowElements", () => {
     );
   });
 
+  it("applies highlight styling: target ring, on-path highlight, off-path dim", () => {
+    const nodes: GraphNode[] = [
+      { id: "exchange:a:x1", kind: "exchange", label: "x1" },
+      { id: "exchange:a:x2", kind: "exchange", label: "x2" },
+      { id: "queue:a:q1", kind: "queue", label: "q1" },
+      { id: "queue:a:q2", kind: "queue", label: "q2" },
+    ];
+    const edges: GraphEdge[] = [
+      { id: "b1", from: "exchange:a:x1", to: "exchange:a:x2", kind: "binds" },
+      { id: "b2", from: "exchange:a:x2", to: "queue:a:q1", kind: "binds" },
+      { id: "b3", from: "exchange:a:x1", to: "queue:a:q2", kind: "binds" },
+    ];
+    const highlight = {
+      targetNodeId: "queue:a:q1",
+      nodeIds: new Set(["queue:a:q1", "exchange:a:x2", "exchange:a:x1"]),
+      edgeIds: new Set(["b1", "b2"]),
+    };
+    const result = toReactFlowElements(graph(nodes, edges), { highlight });
+    const nodeById = new Map(result.nodes.map((n) => [n.id, n]));
+    const edgeById = new Map(result.edges.map((e) => [e.id, e]));
+
+    expect(nodeById.get("queue:a:q1")!.data.highlightState).toBe("target");
+    expect(nodeById.get("exchange:a:x1")!.data.highlightState).toBe("on-path");
+    expect(nodeById.get("queue:a:q2")!.data.highlightState).toBe("off-path");
+    // Off-path nodes are dimmed via opacity, on-path/target nodes keep full opacity.
+    expect(nodeById.get("queue:a:q2")!.style!.opacity).toBeLessThan(0.5);
+    expect(nodeById.get("queue:a:q1")!.style!.opacity ?? 1).toBe(1);
+    // Target gets a distinct box-shadow ring.
+    expect(String(nodeById.get("queue:a:q1")!.style!.boxShadow)).toContain("3px");
+
+    // On-path edges keep normal opacity and get a thicker stroke; off-path
+    // edges are dimmed.
+    expect(edgeById.get("b1")!.style!.opacity ?? 1).toBe(1);
+    expect(edgeById.get("b3")!.style!.opacity).toBeLessThan(0.5);
+    const b1Width = Number(edgeById.get("b1")!.style!.strokeWidth ?? 1);
+    const b3Width = Number(edgeById.get("b3")!.style!.strokeWidth ?? 1);
+    expect(b1Width).toBeGreaterThan(b3Width);
+  });
+
+  it("ignores an empty highlight and renders as if no selection is active", () => {
+    const nodes: GraphNode[] = [
+      { id: "exchange:a:x1", kind: "exchange", label: "x1" },
+      { id: "queue:a:q1", kind: "queue", label: "q1" },
+    ];
+    const edges: GraphEdge[] = [
+      { id: "b1", from: "exchange:a:x1", to: "queue:a:q1", kind: "binds" },
+    ];
+    const result = toReactFlowElements(graph(nodes, edges), {
+      highlight: { nodeIds: new Set(), edgeIds: new Set() },
+    });
+    for (const n of result.nodes) expect(n.data.highlightState).toBeUndefined();
+    for (const e of result.edges) expect(e.style!.opacity ?? 1).toBe(1);
+  });
+
   it("animates shovel/federation edges but not binds/routes", () => {
     const nodes: GraphNode[] = [
       { id: "exchange:a:x1", kind: "exchange", label: "x1" },

@@ -1,13 +1,15 @@
-import { useMemo, useState } from "react";
+import { useCallback, useMemo, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
   MiniMap,
   type Edge,
   type Node,
+  type NodeMouseHandler,
 } from "reactflow";
 import "reactflow/dist/style.css";
 import { buildGraph } from "../../core/graph/buildGraph";
+import { computeUpstreamHighlight } from "../../core/graph/upstreamHighlight";
 import { aggregateImportedTopology } from "../../core/import";
 import type { ImportResult } from "../../core/import";
 import { toReactFlowElements, type FlowEdge, type FlowNode } from "./topologyGraphElements";
@@ -36,12 +38,46 @@ export function TopologyGraphCanvas({
   heightPx = 520,
 }: TopologyGraphCanvasProps): JSX.Element {
   const [showContains, setShowContains] = useState(includeContains);
+  const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
 
-  const flowGraph = useMemo(() => {
+  const graph = useMemo(() => {
     const aggregated = aggregateImportedTopology(result);
-    const graph = buildGraph(aggregated);
-    return toReactFlowElements(graph, { includeContains: showContains });
-  }, [result, showContains]);
+    return buildGraph(aggregated);
+  }, [result]);
+
+  const highlight = useMemo(
+    () => computeUpstreamHighlight(graph, selectedNodeId),
+    [graph, selectedNodeId],
+  );
+
+  const flowGraph = useMemo(
+    () =>
+      toReactFlowElements(graph, {
+        includeContains: showContains,
+        highlight: highlight.nodeIds.size > 0 ? highlight : undefined,
+      }),
+    [graph, showContains, highlight],
+  );
+
+  const onNodeClick = useCallback<NodeMouseHandler>((_, node) => {
+    setSelectedNodeId((prev) => (prev === node.id ? undefined : node.id));
+  }, []);
+
+  const clearSelection = useCallback(() => setSelectedNodeId(undefined), []);
+
+  const selectionSummary = useMemo(() => {
+    if (!selectedNodeId) return undefined;
+    const target = graph.nodes.find((n) => n.id === selectedNodeId);
+    if (!target) return `Selected: ${selectedNodeId} (not in graph)`;
+    if (target.kind !== "queue" && target.kind !== "exchange") {
+      return `Selected ${target.kind}: ${target.label} — upstream highlight only supports queues and exchanges.`;
+    }
+    const ancestorCount = highlight.nodeIds.size > 0 ? highlight.nodeIds.size - 1 : 0;
+    const truncated = highlight.traversal?.truncated ? " (truncated at max depth)" : "";
+    return `Upstream of ${target.kind} '${target.label}': ${ancestorCount} ancestor${
+      ancestorCount === 1 ? "" : "s"
+    }, ${highlight.edgeIds.size} edge${highlight.edgeIds.size === 1 ? "" : "s"}${truncated}.`;
+  }, [selectedNodeId, graph, highlight]);
 
   return (
     <section
@@ -64,7 +100,21 @@ export function TopologyGraphCanvas({
       </div>
       <p style={statsLineStyle} data-testid="topology-graph-stats">
         {flowGraph.nodes.length} nodes · {flowGraph.edges.length} edges
+        {selectedNodeId ? " · click background or the same node again to clear selection" : " · click a queue or exchange to highlight its upstream path"}
       </p>
+      {selectionSummary && (
+        <div style={selectionBarStyle} data-testid="topology-graph-selection-summary">
+          <span>{selectionSummary}</span>
+          <button
+            type="button"
+            onClick={clearSelection}
+            data-testid="topology-graph-clear-selection"
+            style={clearButtonStyle}
+          >
+            Clear selection
+          </button>
+        </div>
+      )}
       <div style={{ height: heightPx, border: "1px solid #ddd", borderRadius: 6 }}>
         <ReactFlow
           nodes={flowGraph.nodes as unknown as Node[]}
@@ -75,6 +125,8 @@ export function TopologyGraphCanvas({
           nodesConnectable={false}
           minZoom={0.1}
           maxZoom={2}
+          onNodeClick={onNodeClick}
+          onPaneClick={clearSelection}
         >
           <Background gap={16} size={1} />
           <Controls showInteractive={false} />
@@ -107,4 +159,25 @@ const statsLineStyle: React.CSSProperties = {
   margin: "0.25rem 0 0.5rem",
   color: "#555",
   fontSize: "0.85rem",
+};
+
+const selectionBarStyle: React.CSSProperties = {
+  display: "flex",
+  justifyContent: "space-between",
+  alignItems: "center",
+  padding: "0.4rem 0.6rem",
+  marginBottom: "0.5rem",
+  background: "#fffbe6",
+  border: "1px solid #f4c542",
+  borderRadius: 4,
+  fontSize: "0.8rem",
+};
+
+const clearButtonStyle: React.CSSProperties = {
+  padding: "0.25rem 0.6rem",
+  border: "1px solid #b08a20",
+  background: "#fff",
+  borderRadius: 4,
+  cursor: "pointer",
+  fontSize: "0.75rem",
 };

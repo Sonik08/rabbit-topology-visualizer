@@ -4,3 +4,4 @@ export * from "./topicMatcher";
 export * from "./traversal";
 export * from "./crossHost";
 export * from "./cycles";
+export * from "./upstreamHighlight";
