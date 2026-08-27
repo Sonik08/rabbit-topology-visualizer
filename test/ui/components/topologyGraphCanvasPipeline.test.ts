@@ -205,3 +205,53 @@ describe("TopologyGraphCanvas pipeline — depth affects highlighting", () => {
     expect([...highlight.nodeIds]).toEqual(["queue:a:q1"]);
   });
 });
+
+describe("TopologyGraphCanvas pipeline — bulk visibility hide layered on broad filters composes correctly", () => {
+  it("bulk-hiding the ids matching a search substring drops every match from applyVisibility while leaving non-matches + filter-removed nodes untouched", () => {
+    // Broad filter to host:a survivors, then bulk-hide the ids whose label
+    // contains the substring "x". Simulates the panel's Hide-all-matches path.
+    const filtered = applyGraphFilters(pipelineFixture(), {
+      hostIds: new Set(["host:a"]),
+    });
+    const matchIds = filtered.nodes
+      .filter((n) => (n.kind === "queue" || n.kind === "exchange"))
+      .filter((n) => n.label.toLowerCase().includes("x"))
+      .map((n) => n.id);
+    // Sanity: matches include the three x1/x2/x3 exchanges on host:a.
+    expect(matchIds).toContain("exchange:a:x1");
+    expect(matchIds).toContain("exchange:a:x2");
+    expect(matchIds).toContain("exchange:a:x3");
+    const state = hideNodes(createEmptyVisibility(), matchIds);
+    const out = applyVisibility(filtered, state);
+    const visibleIds = new Set(out.nodes.map((n) => n.id));
+    // Every match is gone from the rendered graph.
+    for (const id of matchIds) expect(visibleIds.has(id)).toBe(false);
+    // Non-match survivor (queue:a:q1) is still visible.
+    expect(visibleIds.has("queue:a:q1")).toBe(true);
+    // Filter-removed nodes stay gone (queue:b:q2 was on host:b).
+    expect(visibleIds.has("queue:b:q2")).toBe(false);
+    // No dangling edges rendered.
+    for (const e of out.edges) {
+      expect(visibleIds.has(e.from)).toBe(true);
+      expect(visibleIds.has(e.to)).toBe(true);
+    }
+  });
+
+  it("bulk-hide preserves an active isolatedFocus — matches are added to the deny-list on top of isolation, not layered over a cleared focus", () => {
+    const filtered = applyGraphFilters(pipelineFixture(), {
+      hostIds: new Set(["host:a"]),
+    });
+    const isolated = isolateNeighborhood(createEmptyVisibility(), "queue:a:q1", {
+      depth: 2,
+      direction: "both",
+    });
+    // Bulk-hide "x" matches on top of the isolation. hideNodes never touches
+    // isolatedFocus by construction — this pins that invariant end-to-end.
+    const state = hideNodes(isolated, ["exchange:a:x3"]);
+    expect(state.isolatedFocus?.focusNodeId).toBe("queue:a:q1");
+    const out = applyVisibility(filtered, state);
+    const visibleIds = new Set(out.nodes.map((n) => n.id));
+    expect(visibleIds.has("queue:a:q1")).toBe(true);
+    expect(visibleIds.has("exchange:a:x3")).toBe(false);
+  });
+});

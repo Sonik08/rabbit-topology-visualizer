@@ -42,10 +42,11 @@ function graphFixture(): BuildGraphResult {
 interface RenderOptions {
   visibility?: VisibilityState;
   selectedNodeId?: string;
+  graph?: BuildGraphResult;
 }
 
 function renderPanel(opts: RenderOptions = {}) {
-  const graph = graphFixture();
+  const graph = opts.graph ?? graphFixture();
   const visibility = opts.visibility ?? createEmptyVisibility();
   const applied = applyVisibility(graph, visibility);
   const onChange = vi.fn<[VisibilityState], void>();
@@ -60,6 +61,39 @@ function renderPanel(opts: RenderOptions = {}) {
     />,
   );
   return { graph, onChange };
+}
+
+/**
+ * Fixture with >100 matching queues so the "bulk hide" action must operate on
+ * ids that are NOT rendered in the capped checkbox list (which shows only the
+ * first 100). Every queue label starts with `q.bulk.` so a single search term
+ * matches all of them; a handful of distractor queues carry a different
+ * prefix to prove non-matches are preserved.
+ */
+function largeGraphFixture(matchCount = 150, distractorCount = 5): BuildGraphResult {
+  const nodes: GraphNode[] = [
+    { id: "host:h", kind: "host", label: "h", data: { id: "host:h", name: "h", sourceFiles: [] } },
+    {
+      id: "vhost:h:/",
+      kind: "vhost",
+      label: "/",
+      data: { id: "vhost:h:/", hostId: "host:h", name: "/" },
+    },
+  ];
+  const edges: GraphEdge[] = [
+    { id: "c:host->vhost", from: "host:h", to: "vhost:h:/", kind: "contains" },
+  ];
+  for (let i = 0; i < matchCount; i += 1) {
+    const id = `queue:h:bulk-${i}`;
+    nodes.push({ id, kind: "queue", label: `q.bulk.${i}` });
+    edges.push({ id: `c:vhost->${id}`, from: "vhost:h:/", to: id, kind: "contains" });
+  }
+  for (let i = 0; i < distractorCount; i += 1) {
+    const id = `queue:h:keep-${i}`;
+    nodes.push({ id, kind: "queue", label: `q.keep.${i}` });
+    edges.push({ id: `c:vhost->${id}`, from: "vhost:h:/", to: id, kind: "contains" });
+  }
+  return { nodes, edges, diagnostics: [] };
 }
 
 describe("TopologyVisibilityPanel — count summary", () => {
@@ -215,5 +249,132 @@ describe("TopologyVisibilityPanel — searchable entity list", () => {
     fireEvent.click(btn);
     const next = onChange.mock.calls[0]![0];
     expect(next.hiddenNodeIds.has("exchange:h:x1")).toBe(true);
+  });
+});
+
+describe("TopologyVisibilityPanel — bulk deselection for filtered matches (mandatory regression)", () => {
+  it("'Hide all matches' and 'Show all matches' are disabled while the search is empty or whitespace-only", () => {
+    renderPanel();
+    const hide = screen.getByTestId("topology-visibility-hide-all-matches") as HTMLButtonElement;
+    const show = screen.getByTestId("topology-visibility-show-all-matches") as HTMLButtonElement;
+    expect(hide.disabled).toBe(true);
+    expect(show.disabled).toBe(true);
+    // Whitespace-only query stays disabled.
+    fireEvent.change(screen.getByTestId("topology-visibility-search"), {
+      target: { value: "   " },
+    });
+    expect(hide.disabled).toBe(true);
+    expect(show.disabled).toBe(true);
+  });
+
+  it("clicking 'Hide all matches' hides every queue/exchange whose label OR id contains the query (case-insensitive), leaves non-matches alone, and does not mutate the input state", () => {
+    const { onChange } = renderPanel();
+    fireEvent.change(screen.getByTestId("topology-visibility-search"), {
+      target: { value: "AUDIT" },
+    });
+    fireEvent.click(screen.getByTestId("topology-visibility-hide-all-matches"));
+    const next = onChange.mock.calls[0]![0];
+    // Matches: exchange:h:x2 (orders.audit) and queue:h:q2 (q.audit)
+    expect(next.hiddenNodeIds.has("exchange:h:x2")).toBe(true);
+    expect(next.hiddenNodeIds.has("queue:h:q2")).toBe(true);
+    // Non-matches preserved as visible.
+    expect(next.hiddenNodeIds.has("exchange:h:x1")).toBe(false);
+    expect(next.hiddenNodeIds.has("queue:h:q1")).toBe(false);
+    // No isolation set — matches were the only change.
+    expect(next.isolatedFocus).toBeUndefined();
+  });
+
+  it("preserves earlier explicit hides on non-matching entities when a new bulk-hide runs", () => {
+    // Pre-hide q1 (non-match). Then bulk-hide "audit" — q1 should still be hidden.
+    const { onChange } = renderPanel({
+      visibility: hideNodes(createEmptyVisibility(), ["queue:h:q1"]),
+    });
+    fireEvent.change(screen.getByTestId("topology-visibility-search"), {
+      target: { value: "audit" },
+    });
+    fireEvent.click(screen.getByTestId("topology-visibility-hide-all-matches"));
+    const next = onChange.mock.calls[0]![0];
+    // Non-match pre-hide preserved.
+    expect(next.hiddenNodeIds.has("queue:h:q1")).toBe(true);
+    // Matches added on top.
+    expect(next.hiddenNodeIds.has("queue:h:q2")).toBe(true);
+    expect(next.hiddenNodeIds.has("exchange:h:x2")).toBe(true);
+  });
+
+  it("composes with active isolation — bulk-hide layers explicit ids on top of isolatedFocus without clearing it", () => {
+    const { onChange } = renderPanel({
+      visibility: isolateNeighborhood(createEmptyVisibility(), "queue:h:q1", { depth: 2 }),
+    });
+    fireEvent.change(screen.getByTestId("topology-visibility-search"), {
+      target: { value: "audit" },
+    });
+    fireEvent.click(screen.getByTestId("topology-visibility-hide-all-matches"));
+    const next = onChange.mock.calls[0]![0];
+    // Isolation is preserved.
+    expect(next.isolatedFocus?.focusNodeId).toBe("queue:h:q1");
+    // Matching ids are added to the explicit deny-list.
+    expect(next.hiddenNodeIds.has("exchange:h:x2")).toBe(true);
+    expect(next.hiddenNodeIds.has("queue:h:q2")).toBe(true);
+  });
+
+  it("one click hides ALL matches in a >100-entity fixture — bulk action ignores the 100-item render cap", () => {
+    const bigGraph = largeGraphFixture(150, 4);
+    const { onChange } = renderPanel({ graph: bigGraph });
+    fireEvent.change(screen.getByTestId("topology-visibility-search"), {
+      target: { value: "q.bulk" },
+    });
+    // The visible list still caps at 100 rows, but the button counter surfaces
+    // the true match count so the user knows what they're about to hide.
+    const hideBtn = screen.getByTestId(
+      "topology-visibility-hide-all-matches",
+    ) as HTMLButtonElement;
+    expect(hideBtn.textContent).toMatch(/\(150\)/);
+    fireEvent.click(hideBtn);
+    const next = onChange.mock.calls[0]![0];
+    // All 150 matches were hidden — includes ids that never rendered a checkbox.
+    for (let i = 0; i < 150; i += 1) {
+      expect(next.hiddenNodeIds.has(`queue:h:bulk-${i}`)).toBe(true);
+    }
+    // Distractor queues (q.keep.*) were not touched.
+    for (let i = 0; i < 4; i += 1) {
+      expect(next.hiddenNodeIds.has(`queue:h:keep-${i}`)).toBe(false);
+    }
+  });
+
+  it("'Show all matches' restores every hidden match (including bulk-hidden ones) without mutating the input state", () => {
+    // Start with two queues explicitly hidden.
+    const initial = hideNodes(createEmptyVisibility(), [
+      "queue:h:q2",
+      "exchange:h:x2",
+    ]);
+    const originalSize = initial.hiddenNodeIds.size;
+    const { onChange } = renderPanel({ visibility: initial });
+    fireEvent.change(screen.getByTestId("topology-visibility-search"), {
+      target: { value: "audit" },
+    });
+    fireEvent.click(screen.getByTestId("topology-visibility-show-all-matches"));
+    const next = onChange.mock.calls[0]![0];
+    expect(next.hiddenNodeIds.has("queue:h:q2")).toBe(false);
+    expect(next.hiddenNodeIds.has("exchange:h:x2")).toBe(false);
+    // Input state untouched.
+    expect(initial.hiddenNodeIds.size).toBe(originalSize);
+    expect(initial.hiddenNodeIds.has("queue:h:q2")).toBe(true);
+  });
+
+  it("'Show all matches' with an active isolation restores isolation-hidden matches by clearing isolatedFocus (matches per-pill restore behaviour)", () => {
+    // Isolate q1 at depth 1 — q2/x2 (audit) are isolation-hidden.
+    const { onChange } = renderPanel({
+      visibility: isolateNeighborhood(createEmptyVisibility(), "queue:h:q1", {
+        depth: 1,
+        direction: "both",
+      }),
+    });
+    fireEvent.change(screen.getByTestId("topology-visibility-search"), {
+      target: { value: "audit" },
+    });
+    fireEvent.click(screen.getByTestId("topology-visibility-show-all-matches"));
+    const next = onChange.mock.calls[0]![0];
+    // Isolation cleared so the isolation-hidden matches actually come back.
+    expect(next.isolatedFocus).toBeUndefined();
   });
 });

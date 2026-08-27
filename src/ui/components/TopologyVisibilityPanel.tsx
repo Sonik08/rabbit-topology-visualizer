@@ -57,13 +57,17 @@ export function TopologyVisibilityPanel({
     [graph],
   );
 
+  const normalizedQuery = useMemo(() => query.trim().toLowerCase(), [query]);
+  const hasActiveQuery = normalizedQuery.length > 0;
+
   const filteredEntities = useMemo(() => {
-    const q = query.trim().toLowerCase();
-    if (q.length === 0) return searchableEntities;
+    if (!hasActiveQuery) return searchableEntities;
     return searchableEntities.filter(
-      (n) => n.label.toLowerCase().includes(q) || n.id.toLowerCase().includes(q),
+      (n) =>
+        n.label.toLowerCase().includes(normalizedQuery) ||
+        n.id.toLowerCase().includes(normalizedQuery),
     );
-  }, [query, searchableEntities]);
+  }, [hasActiveQuery, normalizedQuery, searchableEntities]);
 
   const hiddenList: GraphNode[] = useMemo(() => {
     const list: GraphNode[] = [];
@@ -93,6 +97,37 @@ export function TopologyVisibilityPanel({
   const onRestore = (nodeId: string): void =>
     onChange(restoreNodes(graph, visibility, [nodeId]));
   const onResetAll = (): void => onChange(resetVisibility());
+  /**
+   * Bulk-hide every queue/exchange that matches the active search across the
+   * ENTIRE searchable list (not just the first 100 rendered by the capped
+   * checkbox list). Guarded to no-op on an empty/whitespace query so nothing
+   * can trigger an accidental hide-all. The reducer used is the same
+   * immutable `hideNodes(state, ids)` powering the checkbox toggle — no
+   * mutation, so `visibility.hiddenNodeIds` on the caller's side is
+   * unaffected, and any active `isolatedFocus` is preserved (the hides
+   * layer on top of isolation, same as an individual checkbox hide).
+   */
+  const onHideAllMatches = (): void => {
+    if (!hasActiveQuery) return;
+    const ids = filteredEntities.map((n) => n.id);
+    if (ids.length === 0) return;
+    onChange(hideNodes(visibility, ids));
+  };
+  /**
+   * Companion action: bulk-restore every match — useful after a
+   * "Hide all matches" or when the user searches for a substring shared by a
+   * batch of already-hidden nodes. Reuses `restoreNodes` so isolation-hidden
+   * matches also come back (clearing `isolatedFocus` when needed, same
+   * semantics as the per-pill Show button).
+   */
+  const onShowAllMatches = (): void => {
+    if (!hasActiveQuery) return;
+    const ids = filteredEntities
+      .filter((n) => effectivelyHidden.has(n.id))
+      .map((n) => n.id);
+    if (ids.length === 0) return;
+    onChange(restoreNodes(graph, visibility, ids));
+  };
 
   return (
     <section
@@ -167,14 +202,44 @@ export function TopologyVisibilityPanel({
 
       <fieldset style={searchFieldsetStyle}>
         <legend style={legendStyle}>Search queues/exchanges</legend>
-        <input
-          type="text"
-          value={query}
-          onChange={onSearch}
-          placeholder="substring, case-insensitive"
-          data-testid="topology-visibility-search"
-          style={searchInputStyle}
-        />
+        <div style={searchRowStyle}>
+          <input
+            type="text"
+            value={query}
+            onChange={onSearch}
+            placeholder="substring, case-insensitive"
+            data-testid="topology-visibility-search"
+            style={searchInputStyle}
+          />
+          <button
+            type="button"
+            onClick={onHideAllMatches}
+            disabled={!hasActiveQuery || filteredEntities.length === 0}
+            data-testid="topology-visibility-hide-all-matches"
+            title={
+              hasActiveQuery
+                ? `Hide every queue/exchange matching "${normalizedQuery}" (${filteredEntities.length} match${filteredEntities.length === 1 ? "" : "es"})`
+                : "Enter a search term to enable bulk hide"
+            }
+            style={bulkButtonStyle}
+          >
+            Hide all matches ({hasActiveQuery ? filteredEntities.length : 0})
+          </button>
+          <button
+            type="button"
+            onClick={onShowAllMatches}
+            disabled={!hasActiveQuery}
+            data-testid="topology-visibility-show-all-matches"
+            title={
+              hasActiveQuery
+                ? `Restore every hidden queue/exchange matching "${normalizedQuery}"`
+                : "Enter a search term to enable bulk restore"
+            }
+            style={bulkButtonStyle}
+          >
+            Show all matches
+          </button>
+        </div>
         <div data-testid="topology-visibility-entity-list" style={entityListStyle}>
           {filteredEntities.slice(0, 100).map((n) => {
             const hidden = effectivelyHidden.has(n.id);
@@ -296,6 +361,22 @@ const searchInputStyle: React.CSSProperties = {
   border: "1px solid #ccc",
   borderRadius: 4,
   minWidth: 200,
+};
+
+const searchRowStyle: React.CSSProperties = {
+  display: "flex",
+  gap: "0.35rem",
+  alignItems: "center",
+  flexWrap: "wrap",
+};
+
+const bulkButtonStyle: React.CSSProperties = {
+  padding: "0.2rem 0.5rem",
+  border: "1px solid #7a5010",
+  background: "#fff9ec",
+  borderRadius: 4,
+  cursor: "pointer",
+  fontSize: "0.72rem",
 };
 
 const entityListStyle: React.CSSProperties = {
