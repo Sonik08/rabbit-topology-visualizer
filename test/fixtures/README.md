@@ -24,3 +24,13 @@ credentials or real infrastructure hostnames.
 
 Use this fixture to exercise the definitions parser, upstream traversal
 across shovel/federation, and cross-vhost queue resolution.
+
+- `rabbit-3.12-shovel-ha-uri.json` — sanitized reproduction of the
+  RabbitMQ 3.12.6 export shape that motivated the shovel HA URI
+  compatibility fix. Every `parameters[*].value["src-uri"]` and
+  `["dest-uri"]` is a JSON array (RabbitMQ's HA form), plus one shovel
+  mixes a scalar `src-uri` with a single-entry `dest-uri` array. All
+  URIs already read `amqp://REDACTED@…` and reference only
+  `*.example.internal` hostnames — no credentials, no real
+  infrastructure names. Use this fixture as the failing-shape
+  regression pin for the parser and buildGraph pipeline.

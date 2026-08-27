@@ -1,0 +1,71 @@
+{
+  "rabbit_version": "3.12.6",
+  "rabbitmq_version": "3.12.6",
+  "product_name": "RabbitMQ",
+  "product_version": "3.12.6",
+  "users": [
+    {
+      "name": "example-user",
+      "password_hash": "REDACTED",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": ["administrator"],
+      "limits": {}
+    }
+  ],
+  "vhosts": [
+    { "name": "/" },
+    { "name": "orders" }
+  ],
+  "permissions": [
+    {
+      "user": "example-user",
+      "vhost": "orders",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "topic_permissions": [],
+  "parameters": [
+    {
+      "value": {
+        "src-uri": [
+          "amqp://REDACTED@primary.example.internal:5672/orders",
+          "amqp://REDACTED@backup.example.internal:5672/orders"
+        ],
+        "src-queue": "orders.out",
+        "dest-uri": [
+          "amqp://REDACTED@local-a.example.internal:5672/orders",
+          "amqp://REDACTED@local-b.example.internal:5672/orders"
+        ],
+        "dest-queue": "orders.in",
+        "ack-mode": "on-confirm",
+        "reconnect-delay": 5
+      },
+      "vhost": "orders",
+      "component": "shovel",
+      "name": "orders-shovel-ha"
+    },
+    {
+      "value": {
+        "src-uri": "amqp://REDACTED@single.example.internal:5672/orders",
+        "src-queue": "audit.out",
+        "dest-uri": [
+          "amqp://REDACTED@dest-only-ha.example.internal:5672/orders"
+        ],
+        "dest-queue": "audit.in"
+      },
+      "vhost": "orders",
+      "component": "shovel",
+      "name": "audit-shovel-mixed-shape"
+    }
+  ],
+  "global_parameters": [],
+  "policies": [],
+  "queues": [
+    { "name": "orders.in", "vhost": "orders", "durable": true, "arguments": {} },
+    { "name": "audit.in", "vhost": "orders", "durable": true, "arguments": {} }
+  ],
+  "exchanges": [],
+  "bindings": []
+}
