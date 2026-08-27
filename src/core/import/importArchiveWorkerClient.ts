@@ -9,6 +9,8 @@ import {
 } from "../graph/traversal";
 import {
   importTopologyArchive,
+  importTopologyBatch,
+  type BatchImportInput,
   type ImportInput,
   type ImportResult,
 } from "./importArchive";
@@ -38,6 +40,13 @@ export interface ImportArchiveWorkerLike {
 export interface ImportArchiveWorkerClient {
   /** Run a parsing/archive import through the worker. */
   importArchive(input: ImportInput): Promise<ImportResult>;
+  /**
+   * Run a batch parse of many individually-selected files through the worker.
+   * Group-parses related split-dump files as if they were extracted from one
+   * archive, so a queues.json + bindings.json pair produces one coherent
+   * `ImportResult`.
+   */
+  importBatch(input: BatchImportInput): Promise<ImportResult>;
   /** Run the graph builder in the worker. */
   buildGraph(input: BuildGraphInput): Promise<BuildGraphResult>;
   /** Run an upstream traversal from a queue target in the worker. */
@@ -216,6 +225,17 @@ export function createImportArchiveWorkerClient(
       }
       return response.result;
     },
+    async importBatch(input) {
+      const id = nextId++;
+      const response = await submitRaw({ id, kind: "import-batch", input });
+      if (response.status === "error") throw new Error(response.message);
+      if (response.kind !== "import-batch") {
+        throw new Error(
+          `Worker returned unexpected response kind '${response.kind}' for import-batch`,
+        );
+      }
+      return response.result;
+    },
     async buildGraph(input) {
       const id = nextId++;
       const response = await submitRaw({ id, kind: "build-graph", input });
@@ -337,6 +357,7 @@ export function createMainThreadClient(): ImportArchiveWorkerClient {
   };
   return {
     importArchive: (input) => guard(() => importTopologyArchive(input)),
+    importBatch: (input) => guard(() => importTopologyBatch(input)),
     buildGraph: (input) => guard(() => buildGraph(input)),
     upstreamForQueue: (input, target, options) =>
       guard(() => upstreamForQueue(input, target, options)),

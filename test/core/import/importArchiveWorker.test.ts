@@ -97,6 +97,24 @@ describe("handleImportArchiveMessage — pure dispatcher", () => {
     expect(response.result.files.length).toBeGreaterThan(0);
   });
 
+  it("dispatches an import-batch request through the batch importer", async () => {
+    const response = await handleImportArchiveMessage({
+      id: 11,
+      kind: "import-batch",
+      input: {
+        files: [
+          { fileName: "minimal-definitions.json", bytes: new Uint8Array(fixtureBytes) },
+        ],
+      },
+    });
+    expect(response.status).toBe("ok");
+    if (response.status !== "ok") throw new Error("expected ok");
+    expect(response.kind).toBe("import-batch");
+    if (response.kind !== "import-batch") throw new Error("expected import-batch");
+    expect(response.result.archiveKind).toBe("batch");
+    expect(response.result.files.length).toBe(1);
+  });
+
   it("dispatches a build-graph request to the graph builder", async () => {
     const response = await handleImportArchiveMessage({
       id: 5,
@@ -348,6 +366,47 @@ describe("createImportArchiveWorkerClient — Promise wrapper", () => {
     expect(result.archivePath).toBe("b.json");
     client.terminate();
     client2.terminate();
+  });
+
+  it("routes an importBatch call through the worker client end-to-end with per-file selectionIndex attribution", async () => {
+    const shim = createShimWorker((req) => handleImportArchiveMessage(req));
+    const client = createImportArchiveWorkerClient({ createWorker: () => shim });
+    const result = await client.importBatch({
+      files: [
+        {
+          fileName: "queues.json",
+          bytes: new TextEncoder().encode(
+            JSON.stringify([{ name: "q.only", vhost: "/", durable: true }]),
+          ),
+          selectionIndex: 0,
+        },
+      ],
+      skipped: [
+        {
+          fileName: "queues.json",
+          sizeBytes: 5,
+          reason: "read-failed",
+          detail: "simulated",
+          selectionIndex: 1,
+        },
+      ],
+    });
+    expect(result.archiveKind).toBe("batch");
+    // Both filenames appear in the result — one parsed as management-dump,
+    // one recorded as load-error thanks to the preflight `skipped` payload.
+    expect(result.files.some((f) => f.path === "queues.json" && f.kind === "management-dump")).toBe(true);
+    expect(result.files.some((f) => f.path === "queues.json" && f.kind === "load-error")).toBe(true);
+    // Every diagnostic keeps the caller-supplied selectionIndex in its
+    // sourceFileId — batch[0]:queues.json and batch[1]:queues.json must both
+    // appear, never a collision on batch[0] or batch[1].
+    const sourceIds = new Set(
+      result.diagnostics.map((d) => d.sourceFileId).filter((id): id is string => Boolean(id)),
+    );
+    expect(sourceIds.has("batch[0]:queues.json")).toBe(true);
+    expect(sourceIds.has("batch[1]:queues.json")).toBe(true);
+    // The request that hit the shim was of kind "import-batch", not "import".
+    expect(shim.posted.some((r) => r.kind === "import-batch")).toBe(true);
+    client.terminate();
   });
 
   it("routes upstream-for-queue through the worker end-to-end", async () => {

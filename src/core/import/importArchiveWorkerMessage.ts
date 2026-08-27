@@ -8,6 +8,8 @@ import {
 } from "../graph/traversal";
 import {
   importTopologyArchive,
+  importTopologyBatch,
+  type BatchImportInput,
   type ImportInput,
   type ImportResult,
 } from "./importArchive";
@@ -23,6 +25,7 @@ import {
  */
 export type WorkerRequest =
   | { id: number; kind: "import"; input: ImportInput }
+  | { id: number; kind: "import-batch"; input: BatchImportInput }
   | { id: number; kind: "build-graph"; input: BuildGraphInput }
   | {
       id: number;
@@ -42,6 +45,7 @@ export type WorkerRequest =
 /** Success/failure envelope posted back from the worker. */
 export type WorkerResponse =
   | { id: number; status: "ok"; kind: "import"; result: ImportResult }
+  | { id: number; status: "ok"; kind: "import-batch"; result: ImportResult }
   | { id: number; status: "ok"; kind: "build-graph"; result: BuildGraphResult }
   | {
       id: number;
@@ -110,6 +114,12 @@ export async function handleImportArchiveMessage(
         if (!input) throw new Error("import request is missing 'input'.");
         const result = await importTopologyArchive(input);
         return { id, status: "ok", kind: "import", result };
+      }
+      case "import-batch": {
+        const input = record.input as BatchImportInput | undefined;
+        if (!input) throw new Error("import-batch request is missing 'input'.");
+        const result = await importTopologyBatch(input);
+        return { id, status: "ok", kind: "import-batch", result };
       }
       case "build-graph": {
         const input = record.input as BuildGraphInput | undefined;

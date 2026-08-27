@@ -26,10 +26,65 @@ export interface ImportedFile {
 }
 
 export interface ImportResult {
-  archiveKind: "rar" | "zip" | "json" | "unknown";
+  archiveKind: "rar" | "zip" | "json" | "batch" | "unknown";
   archivePath: string;
   files: ImportedFile[];
   diagnostics: Diagnostic[];
+}
+
+export interface BatchFileInput {
+  fileName: string;
+  bytes: Uint8Array;
+  /**
+   * The 0-based index of this file in the caller's original picker/drop
+   * selection. When present, the batch importer uses it verbatim as the
+   * `batch[N]` disambiguator on every emitted `Diagnostic.sourceFileId` for
+   * this file, so per-file attribution matches the order the user saw. When
+   * absent the batch importer falls back to the file's position within
+   * `BatchImportInput.files` — safe for callers that don't split selections
+   * into readable / skipped buckets.
+   */
+  selectionIndex?: number;
+}
+
+/**
+ * Metadata for a file the caller has chosen to skip before it hits the batch
+ * importer (typically because it exceeded a browser-side preflight cap). The
+ * batch importer still records these entries in `ImportResult.files` with
+ * `kind: "load-error"` so every source filename in the picker selection
+ * survives, with a matching diagnostic explaining why the bytes were never
+ * loaded.
+ */
+export interface BatchSkippedInput {
+  fileName: string;
+  sizeBytes: number;
+  reason:
+    | "preflight-per-entry-too-large"
+    | "preflight-total-size-exceeded"
+    | "preflight-unprocessed"
+    | "preflight-too-many-files"
+    | "preflight-non-json-in-batch"
+    | "read-failed";
+  /** Optional human-readable elaboration shipped in the emitted diagnostic. */
+  detail?: string;
+  /**
+   * The 0-based index of this file in the caller's original picker/drop
+   * selection. Preserved on the skip so `sourceFileId` remains attributable
+   * to the exact position the user picked — critical when duplicate filenames
+   * exist and skipped/readable files interleave.
+   */
+  selectionIndex?: number;
+}
+
+export interface BatchImportInput {
+  files: BatchFileInput[];
+  /**
+   * Files the caller preflighted and chose not to read. Included in the
+   * output `files` with `kind: "load-error"` so per-file attribution is
+   * preserved and the picker's filename list is intact.
+   */
+  skipped?: BatchSkippedInput[];
+  limits?: Partial<ImportLimits>;
 }
 
 export interface ImportInput {
@@ -133,6 +188,13 @@ interface RawJsonEntry {
   path: string;
   sizeBytes: number;
   bytes: Uint8Array;
+  /**
+   * Explicit disambiguator for `Diagnostic.sourceFileId`. When present, it is
+   * used verbatim instead of `file:${path}`; the batch importer uses this to
+   * keep the visible `path` (used by heuristics like `deriveHostFromPath`)
+   * clean while still generating unique ids for duplicate filenames.
+   */
+  sourceFileId?: string;
 }
 
 async function importRar(
@@ -485,6 +547,7 @@ interface StagedDump {
   path: string;
   sizeBytes: number;
   classification: import("../parse/jsonClassifier").JsonClassification;
+  sourceFileId: string;
 }
 
 /**
@@ -510,8 +573,9 @@ function processJsonEntries(
   const dumpsByHost = new Map<string, StagedDump[]>();
 
   for (const entry of entries) {
+    const sourceFileId = entry.sourceFileId ?? `file:${entry.path}`;
     const text = new TextDecoder("utf-8", { fatal: false }).decode(entry.bytes);
-    const parsed = safeParseJson(text, `file:${entry.path}`);
+    const parsed = safeParseJson(text, sourceFileId);
     if (parsed.diagnostic) {
       diagnostics.push(parsed.diagnostic);
       files.push({ path: entry.path, sizeBytes: entry.sizeBytes, kind: "load-error" });
@@ -524,14 +588,14 @@ function processJsonEntries(
       const definitions = parseDefinitionsExport({
         json: parsed.value,
         hostName,
-        sourceFileId: `file:${entry.path}`,
+        sourceFileId,
       });
       diagnostics.push(...definitions.diagnostics);
       const runtime = parseRuntimeParameters({
         hostId: definitions.host.id,
         vhosts: definitions.vhosts,
         parameters: definitions.rawParameters,
-        sourceFileId: `file:${entry.path}`,
+        sourceFileId,
       });
       diagnostics.push(...runtime.diagnostics);
       files.push({
@@ -556,6 +620,7 @@ function processJsonEntries(
         path: entry.path,
         sizeBytes: entry.sizeBytes,
         classification,
+        sourceFileId,
       };
       if (bucket) bucket.push(staged);
       else dumpsByHost.set(hostKey, [staged]);
@@ -578,7 +643,7 @@ function processJsonEntries(
       files: staged.map((s) => ({
         shape: s.shape,
         json: s.json,
-        sourceFileId: `file:${s.path}`,
+        sourceFileId: s.sourceFileId,
       })),
     });
     diagnostics.push(...split.diagnostics);
@@ -630,3 +695,208 @@ const CANONICAL_ROOT_FILENAMES = new Set([
   "policies.json",
   "vhosts.json",
 ]);
+
+/**
+ * Import a batch of individually-selected files as one coherent topology.
+ * Reuses the archive two-phase pipeline (`processJsonEntries`) so that related
+ * split-dump files (`queues.json`, `exchanges.json`, `bindings.json`,
+ * `parameters.json`, `policies.json`, `vhosts.json`) picked together are
+ * group-parsed via `parseSplitManagementDump` — the same way a folder of dumps
+ * dropped into a ZIP archive would be resolved.
+ *
+ * Limits work per-file (`maxEntryBytes`), per-batch cumulative
+ * (`maxTotalDecompressedBytes`), and per-count (`maxEntryCount`). Non-JSON
+ * files are recorded but skipped rather than aborting the batch — mirrors
+ * archive-import semantics.
+ */
+export async function importTopologyBatch(
+  input: BatchImportInput,
+): Promise<ImportResult> {
+  const diagnostics: Diagnostic[] = [];
+  const limits: ImportLimits = { ...IMPORT_DEFAULT_LIMITS, ...input.limits };
+  const files = input.files;
+  const preSkipped = input.skipped ?? [];
+  const totalFileCount = files.length + preSkipped.length;
+  const archivePath =
+    totalFileCount === 0
+      ? "batch (empty)"
+      : totalFileCount === 1
+        ? `batch: ${(files[0] ?? preSkipped[0])!.fileName}`
+        : `batch: ${totalFileCount} files`;
+
+  if (totalFileCount === 0) {
+    diagnostics.push({
+      severity: "warning",
+      code: "import.batch-empty",
+      message: "Batch import was called with no files.",
+    });
+    return { archiveKind: "batch", archivePath, files: [], diagnostics };
+  }
+
+  if (totalFileCount > limits.maxEntryCount) {
+    diagnostics.push({
+      severity: "error",
+      code: "import.too-many-entries",
+      message: `Batch of ${totalFileCount} files exceeds the entry-count limit (${limits.maxEntryCount}). Refusing to import.`,
+    });
+    // Even in the reject path we surface every filename the caller supplied
+    // so the picker's selection list stays visible in the UI summary, and
+    // any preflight diagnostics the caller attached to `skipped` entries are
+    // preserved (not overwritten by the top-level reject).
+    for (let i = 0; i < preSkipped.length; i += 1) {
+      const s = preSkipped[i]!;
+      const idx = s.selectionIndex ?? files.length + i;
+      const sourceFileId = `${indexKey(idx)}:${s.fileName}`;
+      diagnostics.push({
+        severity:
+          s.reason === "preflight-total-size-exceeded" ||
+          s.reason === "preflight-too-many-files" ||
+          s.reason === "read-failed"
+            ? "error"
+            : "warning",
+        code: preflightCodeFor(s.reason),
+        message: `File '${s.fileName}' (${s.sizeBytes} bytes) was skipped by the caller before load${s.detail ? `: ${s.detail}` : "."}`,
+        sourceFileId,
+      });
+    }
+    const rejectedFiles: ImportedFile[] = [
+      ...files.map((f) => ({
+        path: f.fileName,
+        sizeBytes: f.bytes.byteLength,
+        kind: "load-error" as const,
+      })),
+      ...preSkipped.map((s) => ({
+        path: s.fileName,
+        sizeBytes: s.sizeBytes,
+        kind: "load-error" as const,
+      })),
+    ];
+    return { archiveKind: "batch", archivePath, files: rejectedFiles, diagnostics };
+  }
+
+  const jsonEntries: RawJsonEntry[] = [];
+  const skippedRecords: ImportedFile[] = [];
+  const nonJson: ImportedFile[] = [];
+  let cumulativeBytes = 0;
+  let totalCapCrossedAt: number | undefined;
+  for (let i = 0; i < files.length; i += 1) {
+    const file = files[i]!;
+    // Prefer the caller-supplied `selectionIndex` (the file's original
+    // position in the picker) over the array position — otherwise a UI that
+    // separates readable and skipped files into different buckets would end
+    // up assigning `batch[N]` ids out of picker order, and duplicate
+    // filenames would collide with misleading attribution.
+    const idx = file.selectionIndex ?? i;
+    // `sourceFileId` gets the batch-index disambiguator so duplicate filenames
+    // in the picker (`queues.json` from two different hosts, say) yield
+    // distinct diagnostic ids; the visible `path` stays as the plain
+    // filename so host-derivation heuristics in `processJsonEntries` (e.g.
+    // `rabbit-a.queues.json` → host `rabbit-a`) keep working.
+    const sourceFileId = `${indexKey(idx)}:${file.fileName}`;
+    if (file.bytes.byteLength > limits.maxEntryBytes) {
+      diagnostics.push({
+        severity: "warning",
+        code: "import.entry-too-large",
+        message: `File '${file.fileName}' is ${file.bytes.byteLength} bytes; the per-entry limit is ${limits.maxEntryBytes}. Skipping.`,
+        sourceFileId,
+      });
+      skippedRecords.push({
+        path: file.fileName,
+        sizeBytes: file.bytes.byteLength,
+        kind: "load-error",
+      });
+      continue;
+    }
+    if (
+      totalCapCrossedAt === undefined &&
+      cumulativeBytes + file.bytes.byteLength > limits.maxTotalDecompressedBytes
+    ) {
+      diagnostics.push({
+        severity: "error",
+        code: "import.total-size-exceeded",
+        message: `Batch exceeded the total-size limit (${limits.maxTotalDecompressedBytes}) at '${file.fileName}'. Stopping iteration.`,
+        sourceFileId,
+      });
+      totalCapCrossedAt = i;
+    }
+    if (totalCapCrossedAt !== undefined) {
+      skippedRecords.push({
+        path: file.fileName,
+        sizeBytes: file.bytes.byteLength,
+        kind: "load-error",
+      });
+      continue;
+    }
+    cumulativeBytes += file.bytes.byteLength;
+    if (file.fileName.toLowerCase().endsWith(".json")) {
+      jsonEntries.push({
+        path: file.fileName,
+        sizeBytes: file.bytes.byteLength,
+        bytes: file.bytes,
+        sourceFileId,
+      });
+    } else {
+      nonJson.push({
+        path: file.fileName,
+        sizeBytes: file.bytes.byteLength,
+        kind: "non-json",
+      });
+    }
+  }
+
+  // Merge caller-preflighted skips with the same load-error treatment.
+  for (let i = 0; i < preSkipped.length; i += 1) {
+    const s = preSkipped[i]!;
+    // Same rule as above — honour the caller-supplied `selectionIndex` so
+    // skipped files keep their picker-order attribution when a UI splits
+    // its selection into separate readable / skipped arrays.
+    const idx = s.selectionIndex ?? files.length + i;
+    const sourceFileId = `${indexKey(idx)}:${s.fileName}`;
+    diagnostics.push({
+      severity:
+        s.reason === "preflight-total-size-exceeded" ||
+        s.reason === "preflight-too-many-files" ||
+        s.reason === "read-failed"
+          ? "error"
+          : "warning",
+      code: preflightCodeFor(s.reason),
+      message: `File '${s.fileName}' (${s.sizeBytes} bytes) was skipped by the caller before load${s.detail ? `: ${s.detail}` : "."}`,
+      sourceFileId,
+    });
+    skippedRecords.push({
+      path: s.fileName,
+      sizeBytes: s.sizeBytes,
+      kind: "load-error",
+    });
+  }
+
+  const parsed = processJsonEntries(jsonEntries, diagnostics);
+  return {
+    archiveKind: "batch",
+    archivePath,
+    files: [...parsed, ...nonJson, ...skippedRecords],
+    diagnostics,
+  };
+}
+
+function indexKey(index: number): string {
+  return `batch[${index}]`;
+}
+
+function preflightCodeFor(reason: BatchSkippedInput["reason"]): string {
+  switch (reason) {
+    case "preflight-per-entry-too-large":
+      return "import.preflight-entry-too-large";
+    case "preflight-total-size-exceeded":
+      return "import.preflight-total-size-exceeded";
+    case "preflight-too-many-files":
+      return "import.preflight-too-many-files";
+    case "preflight-non-json-in-batch":
+      return "import.preflight-non-json-in-batch";
+    case "read-failed":
+      return "import.read-failed";
+    case "preflight-unprocessed":
+    default:
+      return "import.preflight-unprocessed";
+  }
+}
