@@ -259,3 +259,146 @@ describe("toReactFlowElements", () => {
     expect(byId.get("f-out")!.animated).toBe(true);
   });
 });
+
+describe("toReactFlowElements — configured-flow rendering (boundary label + pause/reduced-motion)", () => {
+  function scenarioGraph(): BuildGraphResult {
+    const nodes: GraphNode[] = [
+      { id: "exchange:a:x1", kind: "exchange", label: "x1" },
+      { id: "shovel:b:s1", kind: "shovel", label: "s1" },
+      { id: "queue:b:q1", kind: "queue", label: "q1" },
+      { id: "federation:a:f1", kind: "federation", label: "f1" },
+      { id: "exchange:a:x2", kind: "exchange", label: "x2" },
+    ];
+    const edges: GraphEdge[] = [
+      {
+        id: "s-in",
+        from: "exchange:a:x1",
+        to: "shovel:b:s1",
+        kind: "shovels",
+        label: "a-to-b",
+        flow: {
+          linkKind: "shovel",
+          linkName: "a-to-b",
+          role: "in",
+          boundary: "cross-host",
+          sourceHostName: "rabbit-a",
+          sourceVhostName: "/",
+          destinationHostName: "rabbit-b",
+          destinationVhostName: "/",
+        },
+      },
+      {
+        id: "s-out",
+        from: "shovel:b:s1",
+        to: "queue:b:q1",
+        kind: "shovels",
+        label: "a-to-b",
+        flow: {
+          linkKind: "shovel",
+          linkName: "a-to-b",
+          role: "out",
+          boundary: "cross-host",
+          sourceHostName: "rabbit-a",
+          sourceVhostName: "/",
+          destinationHostName: "rabbit-b",
+          destinationVhostName: "/",
+        },
+      },
+      {
+        id: "f-in",
+        from: "exchange:a:x1",
+        to: "federation:a:f1",
+        kind: "federates",
+        label: "orders→audit",
+        flow: {
+          linkKind: "federation",
+          linkName: "orders→audit",
+          role: "in",
+          boundary: "cross-vhost-same-host",
+          sourceHostName: "rabbit-a",
+          sourceVhostName: "orders",
+          destinationHostName: "rabbit-a",
+          destinationVhostName: "audit",
+        },
+      },
+      {
+        id: "f-out",
+        from: "federation:a:f1",
+        to: "exchange:a:x2",
+        kind: "federates",
+        label: "orders→audit",
+        flow: {
+          linkKind: "federation",
+          linkName: "orders→audit",
+          role: "out",
+          boundary: "cross-vhost-same-host",
+          sourceHostName: "rabbit-a",
+          sourceVhostName: "orders",
+          destinationHostName: "rabbit-a",
+          destinationVhostName: "audit",
+        },
+      },
+    ];
+    return { nodes, edges, diagnostics: [] };
+  }
+
+  it("labels shovel & federation edges with link name AND boundary tag", () => {
+    const g = scenarioGraph();
+    const byId = new Map(toReactFlowElements(g).edges.map((e) => [e.id, e]));
+    expect(byId.get("s-in")!.label).toBe(`shovel "a-to-b" · cross-host`);
+    expect(byId.get("f-in")!.label).toBe(
+      `federation "orders→audit" · cross-vhost, same host`,
+    );
+  });
+
+  it("carries the LinkFlow through to FlowEdge.data so downstream code (details panel, path explanation) can inspect it", () => {
+    const g = scenarioGraph();
+    const byId = new Map(toReactFlowElements(g).edges.map((e) => [e.id, e]));
+    expect(byId.get("s-in")!.data.flow?.boundary).toBe("cross-host");
+    expect(byId.get("s-in")!.data.flow?.role).toBe("in");
+    expect(byId.get("s-out")!.data.flow?.role).toBe("out");
+    expect(byId.get("f-in")!.data.flow?.boundary).toBe("cross-vhost-same-host");
+  });
+
+  it("preserves direction — 'in' edges terminate at the shovel/federation node, 'out' edges leave it", () => {
+    const g = scenarioGraph();
+    const byId = new Map(toReactFlowElements(g).edges.map((e) => [e.id, e]));
+    expect(byId.get("s-in")!.target).toBe("shovel:b:s1");
+    expect(byId.get("s-out")!.source).toBe("shovel:b:s1");
+    expect(byId.get("f-in")!.target).toBe("federation:a:f1");
+    expect(byId.get("f-out")!.source).toBe("federation:a:f1");
+  });
+
+  it("animation defaults to ON for shovel & federation edges (marching-ants direction cue)", () => {
+    const g = scenarioGraph();
+    const byId = new Map(toReactFlowElements(g).edges.map((e) => [e.id, e]));
+    expect(byId.get("s-in")!.animated).toBe(true);
+    expect(byId.get("f-out")!.animated).toBe(true);
+  });
+
+  it("user pause suppresses shovel & federation animation but keeps arrowheads visible", () => {
+    const g = scenarioGraph();
+    const byId = new Map(
+      toReactFlowElements(g, {
+        configuredFlowMotion: { paused: true },
+      }).edges.map((e) => [e.id, e]),
+    );
+    expect(byId.get("s-in")!.animated).toBe(false);
+    expect(byId.get("s-out")!.animated).toBe(false);
+    expect(byId.get("f-in")!.animated).toBe(false);
+    // Arrowheads still present so direction remains readable.
+    expect(byId.get("s-in")!.markerEnd?.type).toBe("arrowclosed");
+    expect(byId.get("f-out")!.markerEnd?.type).toBe("arrowclosed");
+  });
+
+  it("prefers-reduced-motion suppresses shovel & federation animation independently of the pause toggle", () => {
+    const g = scenarioGraph();
+    const byId = new Map(
+      toReactFlowElements(g, {
+        configuredFlowMotion: { paused: false, reducedMotion: true },
+      }).edges.map((e) => [e.id, e]),
+    );
+    expect(byId.get("s-in")!.animated).toBe(false);
+    expect(byId.get("f-out")!.animated).toBe(false);
+  });
+});

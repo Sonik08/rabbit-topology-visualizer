@@ -1,10 +1,12 @@
 import type { BuildGraphResult } from "../../core/graph/buildGraph";
+import { describeBoundary } from "../../core/graph/shovelFlow";
 import type {
   Exchange,
   ExchangeType,
   GraphEdge,
   GraphNode,
   GraphNodeKind,
+  LinkFlow,
   Queue,
 } from "../../core/model";
 
@@ -57,11 +59,26 @@ export interface FlowEdge {
   source: string;
   target: string;
   label?: string;
-  data: { kind: GraphEdge["kind"]; routingKey?: string };
+  data: { kind: GraphEdge["kind"]; routingKey?: string; flow?: LinkFlow };
   animated?: boolean;
   style?: React.CSSProperties;
   labelStyle?: React.CSSProperties;
   markerEnd?: FlowEdgeMarker;
+}
+
+/**
+ * Options controlling the configured-flow animation on shovel / federation
+ * edges. This is *configured* topology animation, not live message telemetry —
+ * callers should surface that in the surrounding UI.
+ */
+export interface ConfiguredFlowMotionOptions {
+  /** When true, the user paused the animation manually. */
+  paused?: boolean;
+  /**
+   * When true, the environment reports `prefers-reduced-motion: reduce` and
+   * the animation must be suppressed regardless of the user's pause state.
+   */
+  reducedMotion?: boolean;
 }
 
 const COLUMN_ORDER: GraphNodeKind[] = [
@@ -155,13 +172,19 @@ const EDGE_STYLES: Record<GraphEdge["kind"], React.CSSProperties> = {
  */
 export function toReactFlowElements(
   graph: BuildGraphResult,
-  options: { includeContains?: boolean; highlight?: UpstreamHighlightInput } = {},
+  options: {
+    includeContains?: boolean;
+    highlight?: UpstreamHighlightInput;
+    configuredFlowMotion?: ConfiguredFlowMotionOptions;
+  } = {},
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
   const positionedNodes = layoutNodes(graph.nodes, options.highlight);
   const flowEdges: FlowEdge[] = [];
   const nodeIds = new Set(graph.nodes.map((n) => n.id));
   const highlight = options.highlight;
   const highlightActive = highlight !== undefined && highlight.nodeIds.size > 0;
+  const motion = options.configuredFlowMotion ?? {};
+  const configuredFlowStill = Boolean(motion.paused) || Boolean(motion.reducedMotion);
   for (const edge of graph.edges) {
     if (!options.includeContains && edge.kind === "contains") continue;
     // Drop edges whose endpoints aren't present as nodes — these can occur when
@@ -176,17 +199,22 @@ export function toReactFlowElements(
         ? { ...baseStyle, strokeWidth: Number(baseStyle.strokeWidth ?? 1.5) + 1 }
         : { ...baseStyle, opacity: 0.15 }
       : baseStyle;
+    const isConfiguredFlow =
+      edge.kind === "shovels" || edge.kind === "federates";
     flowEdges.push({
       id: edge.id,
       source: edge.from,
       target: edge.to,
       label: edgeLabel(edge),
-      data: { kind: edge.kind, routingKey: edge.routingKey },
+      data: { kind: edge.kind, routingKey: edge.routingKey, flow: edge.flow },
       style,
       labelStyle: highlightActive && !onPath
         ? { fontSize: 10, fill: "#333", opacity: 0.15 }
         : { fontSize: 10, fill: "#333" },
-      animated: edge.kind === "shovels" || edge.kind === "federates",
+      // Configured-flow animation is directional (dashed marching ants). A
+      // paused user setting OR `prefers-reduced-motion: reduce` suppresses it
+      // — the direction is still readable from the arrowhead + boundary label.
+      animated: isConfiguredFlow && !configuredFlowStill,
       markerEnd: {
         type: "arrowclosed",
         color,
@@ -338,6 +366,20 @@ function dashifyBorder(border: string | undefined): string {
 }
 
 function edgeLabel(edge: GraphEdge): string | undefined {
+  if (edge.kind === "shovels" || edge.kind === "federates") {
+    // Prefer the boundary-annotated label so the operator sees "shovel foo
+    // (cross-host)" without hovering. Never treat this as a live rate — the
+    // label describes the *configured* flow direction, not observed traffic.
+    if (edge.flow) {
+      const linkTag = edge.kind === "shovels" ? "shovel" : "federation";
+      const name = edge.flow.linkName || edge.label || "";
+      return name
+        ? `${linkTag} "${name}" · ${describeBoundary(edge.flow.boundary)}`
+        : `${linkTag} · ${describeBoundary(edge.flow.boundary)}`;
+    }
+    if (edge.label) return edge.label;
+    return edge.kind;
+  }
   if (edge.label) return edge.label;
   if (edge.kind === "binds" || edge.kind === "routes") {
     return edge.routingKey ? `${edge.kind} "${edge.routingKey}"` : edge.kind;

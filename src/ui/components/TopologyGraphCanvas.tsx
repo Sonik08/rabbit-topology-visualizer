@@ -22,6 +22,10 @@ import {
 } from "./TopologyFiltersPanel";
 import { TopologyVisibilityPanel } from "./TopologyVisibilityPanel";
 import {
+  ConfiguredFlowLegend,
+  usePrefersReducedMotion,
+} from "./ConfiguredFlowLegend";
+import {
   applyVisibility,
   createEmptyVisibility,
   type VisibilityState,
@@ -64,6 +68,12 @@ export function TopologyGraphCanvas({
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
   const [filters, setFilters] = useState<FilterState>(() => createEmptyFilterState());
   const [visibility, setVisibility] = useState<VisibilityState>(() => createEmptyVisibility());
+  const [configuredFlowPaused, setConfiguredFlowPaused] = useState(false);
+  const reducedMotion = usePrefersReducedMotion();
+  const configuredFlowMotion = useMemo(
+    () => ({ paused: configuredFlowPaused, reducedMotion }),
+    [configuredFlowPaused, reducedMotion],
+  );
 
   // Resolve the worker client once so the hook effect deps stay stable —
   // `getSharedTopologyWorkerClient()` is a lazy singleton so this is free.
@@ -91,9 +101,10 @@ export function TopologyGraphCanvas({
         {
           includeContains: showContains,
           highlight: highlight.nodeIds.size > 0 ? highlight : undefined,
+          configuredFlowMotion,
         },
       ),
-    [visible, showContains, highlight],
+    [visible, showContains, highlight, configuredFlowMotion],
   );
 
   const onNodeClick = useCallback<NodeMouseHandler>((_, node) => {
@@ -140,6 +151,11 @@ export function TopologyGraphCanvas({
         {highlightLoading ? " · computing upstream…" : ""}
         {!buildLoading && !highlightLoading && (selectedNodeId ? " · click background or the same node again to clear selection" : " · click a queue or exchange to highlight its upstream path")}
       </p>
+      <ConfiguredFlowLegend
+        paused={configuredFlowPaused}
+        reducedMotion={reducedMotion}
+        onTogglePause={() => setConfiguredFlowPaused((prev) => !prev)}
+      />
       <TopologyFiltersPanel graph={rawGraph} filters={filters} onChange={setFilters} />
       <TopologyVisibilityPanel
         graph={graph}

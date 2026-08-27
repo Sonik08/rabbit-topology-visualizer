@@ -12,6 +12,7 @@ import type {
   Vhost,
 } from "../model";
 import { redactAmqpUri } from "../parse/amqpUri";
+import { buildLinkFlow } from "./shovelFlow";
 
 export interface BuildGraphInput {
   hosts: Host[];
@@ -218,6 +219,15 @@ export function buildGraph(input: BuildGraphInput): BuildGraphResult {
   const hostByNameLower = new Map(
     input.hosts.map((h) => [h.name.toLowerCase(), h] as const),
   );
+  const hostById = new Map(input.hosts.map((h) => [h.id, h] as const));
+  const linkContextForVhost = (vhostId: string) => {
+    const vh = vhostById.get(vhostId);
+    const host = vh ? hostById.get(vh.hostId) : undefined;
+    return {
+      linkHostName: host?.name ?? "",
+      linkVhostName: vh?.name ?? "",
+    };
+  };
 
   for (const binding of input.bindings) {
     addEdge({
@@ -311,12 +321,21 @@ export function buildGraph(input: BuildGraphInput): BuildGraphResult {
     });
     const src = resolveEndpoint(shovel.source, shovel.vhostId);
     const dst = resolveEndpoint(shovel.destination, shovel.vhostId);
+    const shovelContext = linkContextForVhost(shovel.vhostId);
     addEdge({
       id: `shovel-in:${shovel.id}<-${src.id}`,
       from: src.id,
       to: shovel.id,
       kind: "shovels",
       label: shovel.name,
+      flow: buildLinkFlow({
+        source: shovel.source,
+        destination: shovel.destination,
+        context: shovelContext,
+        linkKind: "shovel",
+        linkName: shovel.name,
+        role: "in",
+      }),
     });
     addEdge({
       id: `shovel-out:${shovel.id}->${dst.id}`,
@@ -324,6 +343,14 @@ export function buildGraph(input: BuildGraphInput): BuildGraphResult {
       to: dst.id,
       kind: "shovels",
       label: shovel.name,
+      flow: buildLinkFlow({
+        source: shovel.source,
+        destination: shovel.destination,
+        context: shovelContext,
+        linkKind: "shovel",
+        linkName: shovel.name,
+        role: "out",
+      }),
     });
   }
 
@@ -342,12 +369,21 @@ export function buildGraph(input: BuildGraphInput): BuildGraphResult {
     });
     const up = resolveEndpoint(fed.upstream, fed.vhostId);
     const down = resolveEndpoint(fed.downstream, fed.vhostId);
+    const fedContext = linkContextForVhost(fed.vhostId);
     addEdge({
       id: `fed-in:${fed.id}<-${up.id}`,
       from: up.id,
       to: fed.id,
       kind: "federates",
       label: fed.name,
+      flow: buildLinkFlow({
+        source: fed.upstream,
+        destination: fed.downstream,
+        context: fedContext,
+        linkKind: "federation",
+        linkName: fed.name,
+        role: "in",
+      }),
     });
     addEdge({
       id: `fed-out:${fed.id}->${down.id}`,
@@ -355,6 +391,14 @@ export function buildGraph(input: BuildGraphInput): BuildGraphResult {
       to: down.id,
       kind: "federates",
       label: fed.name,
+      flow: buildLinkFlow({
+        source: fed.upstream,
+        destination: fed.downstream,
+        context: fedContext,
+        linkKind: "federation",
+        linkName: fed.name,
+        role: "out",
+      }),
     });
   }
 
