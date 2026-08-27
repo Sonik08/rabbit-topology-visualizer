@@ -63,12 +63,29 @@ export function computeUpstreamHighlight(
   if (target.kind !== "queue" && target.kind !== "exchange") return emptyHighlight();
 
   const traversal = traverseUpstream(input, targetNodeId, options);
+  return highlightFromTraversal(input, targetNodeId, traversal, options.followDeadLetter === true);
+}
+
+/**
+ * Build a highlight from a pre-computed traversal. Used by the Web Worker
+ * pipeline in `TopologyGraphCanvas` — the worker runs the (potentially
+ * expensive) `upstreamForQueue`/`upstreamForExchange` off-thread and returns
+ * an `UpstreamTraversalResult`; this helper turns that into the same
+ * `UpstreamHighlight` shape `computeUpstreamHighlight` produces on the main
+ * thread.
+ */
+export function highlightFromTraversal(
+  input: UpstreamGraphInput,
+  targetNodeId: string,
+  traversal: UpstreamTraversalResult,
+  followDeadLetter = false,
+): UpstreamHighlight {
   const nodeIds = new Set<string>();
   nodeIds.add(targetNodeId);
   for (const id of traversal.reachableAncestorIds) nodeIds.add(id);
 
   const followedKinds = new Set<GraphEdgeKind>(ROUTING_EDGE_KINDS);
-  if (options.followDeadLetter === true) followedKinds.add("dead-letter");
+  if (followDeadLetter) followedKinds.add("dead-letter");
 
   const edgeIds = new Set<string>();
   // Seed with the shortest-path edges even if they somehow fall outside

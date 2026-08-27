@@ -8,20 +8,20 @@ import ReactFlow, {
   type NodeMouseHandler,
 } from "reactflow";
 import "reactflow/dist/style.css";
-import { buildGraph } from "../../core/graph/buildGraph";
-import { applyGraphFilters } from "../../core/graph/filterGraph";
-import { computeUpstreamHighlight } from "../../core/graph/upstreamHighlight";
-import { aggregateImportedTopology } from "../../core/import";
-import type { ImportResult } from "../../core/import";
+import {
+  getSharedTopologyWorkerClient,
+  type ImportArchiveWorkerClient,
+  type ImportResult,
+} from "../../core/import";
 import { EntityDetailsPanel } from "./EntityDetailsPanel";
 import { PathExplanationPanel } from "./PathExplanationPanel";
 import {
   createEmptyFilterState,
-  toGraphFilters,
   TopologyFiltersPanel,
   type FilterState,
 } from "./TopologyFiltersPanel";
 import { toReactFlowElements, type FlowEdge, type FlowNode } from "./topologyGraphElements";
+import { useTopologyGraph } from "../hooks/useTopologyGraph";
 
 export interface TopologyGraphCanvasProps {
   result: ImportResult;
@@ -29,6 +29,13 @@ export interface TopologyGraphCanvasProps {
   includeContains?: boolean;
   /** Canvas height in pixels. Default 520. */
   heightPx?: number;
+  /**
+   * Worker client used for the off-main-thread graph build + upstream
+   * traversal calls. Defaults to the process-wide shared client (which
+   * transparently falls back to a same-thread implementation when `Worker`
+   * is unavailable). Test injection point.
+   */
+  workerClient?: ImportArchiveWorkerClient;
 }
 
 /**
@@ -45,25 +52,21 @@ export function TopologyGraphCanvas({
   result,
   includeContains = false,
   heightPx = 520,
+  workerClient,
 }: TopologyGraphCanvasProps): JSX.Element {
   const [showContains, setShowContains] = useState(includeContains);
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
   const [filters, setFilters] = useState<FilterState>(() => createEmptyFilterState());
 
-  const rawGraph = useMemo(() => {
-    const aggregated = aggregateImportedTopology(result);
-    return buildGraph(aggregated);
-  }, [result]);
-
-  const graph = useMemo(
-    () => applyGraphFilters(rawGraph, toGraphFilters(filters)),
-    [rawGraph, filters],
+  // Resolve the worker client once so the hook effect deps stay stable —
+  // `getSharedTopologyWorkerClient()` is a lazy singleton so this is free.
+  const client = useMemo(
+    () => workerClient ?? getSharedTopologyWorkerClient(),
+    [workerClient],
   );
 
-  const highlight = useMemo(
-    () => computeUpstreamHighlight(graph, selectedNodeId, { maxDepth: filters.maxDepth }),
-    [graph, selectedNodeId, filters.maxDepth],
-  );
+  const { rawGraph, graph, highlight, buildLoading, highlightLoading, selectedNode } =
+    useTopologyGraph({ result, filters, selectedNodeId, workerClient: client });
 
   const flowGraph = useMemo(
     () =>
@@ -79,11 +82,6 @@ export function TopologyGraphCanvas({
   }, []);
 
   const clearSelection = useCallback(() => setSelectedNodeId(undefined), []);
-
-  const selectedNode = useMemo(
-    () => (selectedNodeId ? rawGraph.nodes.find((n) => n.id === selectedNodeId) : undefined),
-    [rawGraph, selectedNodeId],
-  );
 
   const selectionSummary = useMemo(() => {
     if (!selectedNodeId) return undefined;
@@ -119,7 +117,9 @@ export function TopologyGraphCanvas({
       </div>
       <p style={statsLineStyle} data-testid="topology-graph-stats">
         {flowGraph.nodes.length} nodes · {flowGraph.edges.length} edges (of {rawGraph.nodes.length} · {rawGraph.edges.length})
-        {selectedNodeId ? " · click background or the same node again to clear selection" : " · click a queue or exchange to highlight its upstream path"}
+        {buildLoading ? " · building graph…" : ""}
+        {highlightLoading ? " · computing upstream…" : ""}
+        {!buildLoading && !highlightLoading && (selectedNodeId ? " · click background or the same node again to clear selection" : " · click a queue or exchange to highlight its upstream path")}
       </p>
       <TopologyFiltersPanel graph={rawGraph} filters={filters} onChange={setFilters} />
       {selectionSummary && (

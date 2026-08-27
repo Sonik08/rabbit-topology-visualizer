@@ -1,6 +1,6 @@
 import { useCallback, useState, type ChangeEvent, type DragEvent } from "react";
 import {
-  importTopologyArchive,
+  getSharedTopologyWorkerClient,
   type ImportResult,
 } from "../../core/import";
 import { TopologySummaryPanel } from "./TopologySummaryPanel";
@@ -25,7 +25,11 @@ export function ImportPanel({ onImported }: ImportPanelProps): JSX.Element {
       setState({ status: "loading", fileName: file.name });
       try {
         const bytes = new Uint8Array(await file.arrayBuffer());
-        const result = await importTopologyArchive({
+        // Route parsing through the shared Web Worker client so large
+        // topologies don't freeze the UI thread. The shared client falls
+        // back to the same-thread parser when Worker is unavailable
+        // (e.g. jsdom under vitest, unsupported browsers).
+        const result = await getSharedTopologyWorkerClient().importArchive({
           fileName: file.name,
           bytes,
         });
