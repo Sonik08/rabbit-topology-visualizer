@@ -11,6 +11,7 @@ import {
 import type { BuildGraphResult } from "../../../src/core/graph/buildGraph";
 import type { GraphEdge, GraphNode } from "../../../src/core/model";
 import { toReactFlowElements } from "../../../src/ui/components/topologyGraphElements";
+import { composeFocusedTopology } from "../../../src/ui/components/topologyRenderPipeline";
 
 /**
  * Integration coverage for TopologyGraphCanvas's data pipeline:
@@ -203,6 +204,128 @@ describe("TopologyGraphCanvas pipeline — depth affects highlighting", () => {
     // Only the target itself remains highlighted because every routing edge
     // was filtered out before traversal ran.
     expect([...highlight.nodeIds]).toEqual(["queue:a:q1"]);
+  });
+});
+
+describe("TopologyGraphCanvas pipeline — focused mode composes with filters + visibility (never resurrects excluded nodes)", () => {
+  // These tests call `composeFocusedTopology` — the SAME function
+  // `TopologyGraphCanvas` uses internally — so reordering or bypassing a
+  // stage in the canvas's wiring shows up as a failure here without needing
+  // to mount ReactFlow. The filter stage still lives inside
+  // `useTopologyGraph`; we mimic that by calling `applyGraphFilters` first
+  // and feeding the result into `composeFocusedTopology` as `graph`.
+  it("focused mode operates on the FILTERED graph — the unrelated host's queue cannot appear in a focused view rooted on host:a even at maxDepth=32", () => {
+    const filtered = applyGraphFilters(pipelineFixture(), {
+      hostIds: new Set(["host:a"]),
+    });
+    const { focused } = composeFocusedTopology({
+      graph: filtered,
+      visibility: createEmptyVisibility(),
+      focusNodeId: "queue:a:q1",
+      focusMaxDepth: 32,
+    });
+    expect(focused).toBeDefined();
+    const ids = new Set(focused!.nodes.map((n) => n.id));
+    // Full a-chain reachable + contains ancestry present.
+    expect(ids.has("queue:a:q1")).toBe(true);
+    expect(ids.has("exchange:a:x3")).toBe(true);
+    expect(ids.has("exchange:a:x2")).toBe(true);
+    expect(ids.has("exchange:a:x1")).toBe(true);
+    expect(ids.has("host:a")).toBe(true);
+    expect(ids.has("vhost:a:/")).toBe(true);
+    // host:b + queue:b:q2 stayed out because applyGraphFilters removed them
+    // BEFORE the composition ran — a focused view cannot resurrect them.
+    expect(ids.has("host:b")).toBe(false);
+    expect(ids.has("queue:b:q2")).toBe(false);
+    expect(focused!.focusMissing).toBe(false);
+  });
+
+  it("focus target that was filtered out yields the actionable empty-focused-view result (focusMissing=true) instead of resurrecting host:b entities", () => {
+    const filtered = applyGraphFilters(pipelineFixture(), {
+      hostIds: new Set(["host:a"]),
+    });
+    const { focused } = composeFocusedTopology({
+      graph: filtered,
+      visibility: createEmptyVisibility(),
+      focusNodeId: "queue:b:q2",
+      focusMaxDepth: 32,
+    });
+    expect(focused).toBeDefined();
+    expect(focused!.focusMissing).toBe(true);
+    expect(focused!.nodes).toEqual([]);
+    expect(focused!.edges).toEqual([]);
+  });
+
+  it("visibility hide is applied BEFORE the focused-mode clip: hiding a mid-chain exchange cuts the focused chain and prunes the now-unreachable ancestors", () => {
+    // Full graph → no broad filter → hide the middle exchange x2 → focus.
+    const { focused } = composeFocusedTopology({
+      graph: pipelineFixture(),
+      visibility: hideNodes(createEmptyVisibility(), ["exchange:a:x2"]),
+      focusNodeId: "queue:a:q1",
+      focusMaxDepth: 32,
+    });
+    expect(focused).toBeDefined();
+    const ids = new Set(focused!.nodes.map((n) => n.id));
+    // Chain from focus: queue:a:q1 ← exchange:a:x3 ← (x2 hidden, stops here)
+    // — x1 is no longer reachable because x2's edges disappeared with it.
+    expect(ids.has("queue:a:q1")).toBe(true);
+    expect(ids.has("exchange:a:x3")).toBe(true);
+    expect(ids.has("exchange:a:x2")).toBe(false);
+    expect(ids.has("exchange:a:x1")).toBe(false);
+    // Contains ancestry still preserved for the surviving chain.
+    expect(ids.has("vhost:a:/")).toBe(true);
+    expect(ids.has("host:a")).toBe(true);
+  });
+
+  it("end-to-end pipeline (filter → composeFocusedTopology → toReactFlowElements) never emits a rendered node id that was excluded upstream", () => {
+    // Broad filter drops host:b, visibility hides x1, focus on queue:a:q1.
+    const filtered = applyGraphFilters(pipelineFixture(), {
+      hostIds: new Set(["host:a"]),
+    });
+    const { renderInput } = composeFocusedTopology({
+      graph: filtered,
+      visibility: hideNodes(createEmptyVisibility(), ["exchange:a:x1"]),
+      focusNodeId: "queue:a:q1",
+      focusMaxDepth: 32,
+    });
+    const flow = toReactFlowElements(renderInput, { includeContains: false });
+    const renderedIds = new Set(flow.nodes.map((n) => n.id));
+    // Focused survivors after the two exclusions: q1 ← x3 ← x2 (x1 hidden).
+    expect(renderedIds.has("queue:a:q1")).toBe(true);
+    expect(renderedIds.has("exchange:a:x3")).toBe(true);
+    expect(renderedIds.has("exchange:a:x2")).toBe(true);
+    // Excluded upstream — must NOT reappear via the focused-mode clip.
+    expect(renderedIds.has("exchange:a:x1")).toBe(false);
+    expect(renderedIds.has("host:b")).toBe(false);
+    expect(renderedIds.has("queue:b:q2")).toBe(false);
+    // Rendered edges only connect kept nodes.
+    for (const e of flow.edges) {
+      expect(renderedIds.has(e.source)).toBe(true);
+      expect(renderedIds.has(e.target)).toBe(true);
+    }
+  });
+
+  it("regression: composeFocusedTopology.renderInput === focused when focusNodeId is set, so any wiring that bypasses the clip fails a shared-function assertion", () => {
+    const filtered = applyGraphFilters(pipelineFixture());
+    const composition = composeFocusedTopology({
+      graph: filtered,
+      visibility: createEmptyVisibility(),
+      focusNodeId: "queue:a:q1",
+      focusMaxDepth: 32,
+    });
+    // Identity check: the render input is the focused-mode result, not the
+    // pre-focus `visible` payload. If a future refactor accidentally hands
+    // the visible graph to the renderer while focus is active, this fails.
+    expect(composition.focused).toBeDefined();
+    expect(composition.renderInput).toBe(composition.focused);
+    // Without focus, renderInput mirrors the visible graph instead.
+    const noFocus = composeFocusedTopology({
+      graph: filtered,
+      visibility: createEmptyVisibility(),
+    });
+    expect(noFocus.focused).toBeUndefined();
+    expect(noFocus.renderInput.nodes).toBe(noFocus.visible.nodes);
+    expect(noFocus.renderInput.edges).toBe(noFocus.visible.edges);
   });
 });
 

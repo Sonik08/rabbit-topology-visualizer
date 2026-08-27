@@ -27,11 +27,10 @@ import {
   usePrefersReducedMotion,
 } from "./ConfiguredFlowLegend";
 import {
-  applyVisibility,
   createEmptyVisibility,
   type VisibilityState,
 } from "../../core/graph/visibility";
-import { pruneNeighborhood } from "../../core/graph/pruneNeighborhood";
+import { composeFocusedTopology } from "./topologyRenderPipeline";
 import { toReactFlowElements, type FlowEdge, type FlowNode } from "./topologyGraphElements";
 import { useTopologyGraph } from "../hooks/useTopologyGraph";
 
@@ -153,40 +152,33 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
   const { rawGraph, graph, highlight, buildLoading, highlightLoading, selectedNode } =
     useTopologyGraph({ result, filters, selectedNodeId, workerClient: client });
 
-  // Visibility overlay runs synchronously on top of the filtered graph — it
-  // is a pure user-driven allow/deny list so an off-thread trip isn't worth
-  // the state-management cost. `applyVisibility` is O(V+E) and reversible.
-  const visible = useMemo(() => applyVisibility(graph, visibility), [graph, visibility]);
+  // Post-filter render pipeline: visibility overlay → optional focused-mode
+  // clip → shape for React Flow. Extracted into `composeFocusedTopology` so
+  // pipeline-composition tests can call the exact same function the canvas
+  // does — reordering or bypassing a stage in the canvas's wiring shows up
+  // as a regression against `composeFocusedTopology`.
+  const composition = useMemo(
+    () =>
+      composeFocusedTopology({
+        graph,
+        visibility,
+        focusNodeId,
+        focusMaxDepth,
+      }),
+    [graph, visibility, focusNodeId, focusMaxDepth],
+  );
+  const visible = composition.visible;
+  const focused = composition.focused;
 
-  // Focused-mode clip: when `focusNodeId` is set, restrict the rendered
-  // graph to the routing-edge neighborhood of that node. Runs AFTER the
-  // filter + visibility passes so a focused view never resurrects entities
-  // the operator has already excluded — matches the task's "compose with
-  // filters and visibility without resurrecting excluded nodes" rule.
-  const focused = useMemo(() => {
-    if (!focusNodeId) return undefined;
-    return pruneNeighborhood(
-      { nodes: visible.nodes, edges: visible.edges, diagnostics: visible.diagnostics },
-      focusNodeId,
-      { maxDepth: focusMaxDepth, direction: "both" },
-    );
-  }, [focusNodeId, focusMaxDepth, visible]);
-
-  const flowGraph = useMemo(() => {
-    const source = focused ?? {
-      nodes: visible.nodes,
-      edges: visible.edges,
-      diagnostics: visible.diagnostics,
-    };
-    return toReactFlowElements(
-      source,
-      {
+  const flowGraph = useMemo(
+    () =>
+      toReactFlowElements(composition.renderInput, {
         includeContains: showContains,
         highlight: highlight.nodeIds.size > 0 ? highlight : undefined,
         configuredFlowMotion,
-      },
-    );
-  }, [focused, visible, showContains, highlight, configuredFlowMotion]);
+      }),
+    [composition, showContains, highlight, configuredFlowMotion],
+  );
 
   const onNodeClick = useCallback<NodeMouseHandler>((_, node) => {
     setSelectedNodeId((prev) => (prev === node.id ? undefined : node.id));
