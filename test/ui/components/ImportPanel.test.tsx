@@ -70,6 +70,70 @@ describe("ImportPanel — file picker success flow", () => {
   });
 });
 
+describe("ImportPanel — RabbitMQ 3.12 shovel HA URI regression", () => {
+  it("importing the sanitized 3.12.6 HA-URI fixture through the file picker keeps BOTH shovels and never leaks credentials", async () => {
+    const haFixturePath = resolve(
+      here,
+      "..",
+      "..",
+      "fixtures",
+      "rabbit-3.12-shovel-ha-uri.json",
+    );
+    const haBytes = readFileSync(haFixturePath);
+    const onImported = vi.fn();
+    const { container } = render(<ImportPanel onImported={onImported} />);
+    const input = container.querySelector<HTMLInputElement>("input[type=file]")!;
+    const file = makeFile(
+      "rabbit-3.12-shovel-ha-uri.json",
+      new Uint8Array(haBytes),
+    );
+    fireEvent.change(input, { target: { files: [file] } });
+    await screen.findByText(/Loaded JSON/i, {}, { timeout: 5000 });
+    expect(onImported).toHaveBeenCalledTimes(1);
+    const result = onImported.mock.calls[0]![0];
+    const runtime = result.files[0].runtime;
+    expect(runtime.shovels.map((s: { name: string }) => s.name).sort()).toEqual([
+      "audit-shovel-mixed-shape",
+      "orders-shovel-ha",
+    ]);
+    // Regression pin against the pre-fix behaviour where array-valued src-uri
+    // silently dropped the primary source endpoint host derivation.
+    const ha = runtime.shovels.find(
+      (s: { name: string }) => s.name === "orders-shovel-ha",
+    );
+    expect(ha.source.host).toBe("primary.example.internal");
+    expect(ha.destination.host).toBe("local-a.example.internal");
+    // No `user:pass@` substring reaches the ImportPanel's onImported payload.
+    const serialised = JSON.stringify(result);
+    expect(serialised).not.toMatch(/amqp:\/\/[^@:"\s]+:[^@:"\s]+@/);
+  });
+
+  it("drag-dropping the sanitized 3.12.6 HA-URI fixture goes through the same path and preserves both shovels", async () => {
+    const haFixturePath = resolve(
+      here,
+      "..",
+      "..",
+      "fixtures",
+      "rabbit-3.12-shovel-ha-uri.json",
+    );
+    const haBytes = readFileSync(haFixturePath);
+    const onImported = vi.fn();
+    render(<ImportPanel onImported={onImported} />);
+    const drop = screen.getByTestId("import-drop-zone");
+    const file = makeFile(
+      "rabbit-3.12-shovel-ha-uri.json",
+      new Uint8Array(haBytes),
+    );
+    fireEvent.drop(drop, { dataTransfer: { files: [file] } });
+    await screen.findByText(/Loaded JSON/i, {}, { timeout: 5000 });
+    expect(onImported).toHaveBeenCalledTimes(1);
+    const result = onImported.mock.calls[0]![0];
+    expect(result.files[0].runtime.shovels.length).toBe(2);
+    const serialised = JSON.stringify(result);
+    expect(serialised).not.toMatch(/amqp:\/\/[^@:"\s]+:[^@:"\s]+@/);
+  });
+});
+
 describe("ImportPanel — file picker error flow", () => {
   it("surfaces a parse-error diagnostic in the summary for malformed JSON", async () => {
     const { container } = render(<ImportPanel />);

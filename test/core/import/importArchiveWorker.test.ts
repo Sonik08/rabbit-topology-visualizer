@@ -215,6 +215,46 @@ describe("handleImportArchiveMessage — pure dispatcher", () => {
     if (response.status !== "error") throw new Error("expected error");
     expect(response.message).toMatch(/build-graph.*missing/i);
   });
+
+  it("regression: processes the RabbitMQ 3.12 HA shovel URI export shape end-to-end without dropping shovels or leaking credentials", async () => {
+    // Sanitized reproduction of the failing 3.12.6 shape from the real export
+    // this task is anchored on. Pre-fix, `parseShovel` silently discarded the
+    // array-valued src-uri/dest-uri so both shovels disappeared from the
+    // worker's runtime response — the worker path never surfaced the drop.
+    const haFixturePath = resolve(
+      here,
+      "..",
+      "..",
+      "fixtures",
+      "rabbit-3.12-shovel-ha-uri.json",
+    );
+    const bytes = new Uint8Array(readFileSync(haFixturePath));
+    const response = await handleImportArchiveMessage({
+      id: 312,
+      kind: "import",
+      input: { fileName: "rabbit-3.12-shovel-ha-uri.json", bytes },
+    });
+    expect(response.status).toBe("ok");
+    if (response.status !== "ok") throw new Error("expected ok");
+    expect(response.kind).toBe("import");
+    if (response.kind !== "import") throw new Error("expected import");
+    const file = response.result.files[0];
+    expect(file?.kind).toBe("definitions");
+    // Both shovels materialise through the worker path (pre-fix regression pin).
+    expect(file?.runtime?.shovels.map((s) => s.name).sort()).toEqual([
+      "audit-shovel-mixed-shape",
+      "orders-shovel-ha",
+    ]);
+    // Primary endpoint host derived from the FIRST URI in each HA array,
+    // even when the import path went through the worker dispatcher.
+    const ha = file?.runtime?.shovels.find((s) => s.name === "orders-shovel-ha");
+    expect(ha?.source.host).toBe("primary.example.internal");
+    expect(ha?.destination.host).toBe("local-a.example.internal");
+    // Full serialized worker response must never contain a raw user:pass@
+    // AMQP userinfo pattern — credentials stay redacted end-to-end.
+    const serialised = JSON.stringify(response);
+    expect(serialised).not.toMatch(/amqp:\/\/[^@:"\s]+:[^@:"\s]+@/);
+  });
 });
 
 describe("createImportArchiveWorkerClient — Promise wrapper", () => {
