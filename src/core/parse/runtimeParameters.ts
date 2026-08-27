@@ -217,10 +217,26 @@ function parseShovel(
     });
     return undefined;
   }
-  const srcUri = asString(v["src-uri"] ?? v.src_uri);
+  const srcUri = pickShovelUri(
+    v["src-uri"] ?? v.src_uri,
+    "src-uri",
+    p,
+    diagnostics,
+    sourceFileId,
+    hostId,
+    vhostId,
+  );
   const srcExchange = asString(v["src-exchange"] ?? v.src_exchange);
   const srcQueue = asString(v["src-queue"] ?? v.src_queue);
-  const destUri = asString(v["dest-uri"] ?? v.dest_uri);
+  const destUri = pickShovelUri(
+    v["dest-uri"] ?? v.dest_uri,
+    "dest-uri",
+    p,
+    diagnostics,
+    sourceFileId,
+    hostId,
+    vhostId,
+  );
   const destExchange = asString(v["dest-exchange"] ?? v.dest_exchange);
   const destQueue = asString(v["dest-queue"] ?? v.dest_queue);
 
@@ -319,6 +335,84 @@ function firstUri(value: unknown): string | undefined {
   if (Array.isArray(value)) {
     const first = value.find((s) => typeof s === "string" && s.length > 0);
     if (typeof first === "string") return first;
+  }
+  return undefined;
+}
+
+/**
+ * Normalize the string-or-array `src-uri` / `dest-uri` form used by RabbitMQ
+ * shovels for HA. RabbitMQ tries the URIs in order until one connects, so we
+ * treat the first non-empty string as the primary endpoint for host/vhost
+ * display. Alternate URIs stay preserved (redacted) in `Shovel.arguments`
+ * because `redactValue` walks the whole raw value tree — no separate schema
+ * change is needed to retain them.
+ *
+ * Emits actionable diagnostics for the failure modes seen on real 3.12 exports:
+ * empty arrays, arrays containing no strings, and mixed arrays whose non-string
+ * entries had to be skipped.
+ */
+function pickShovelUri(
+  raw: unknown,
+  fieldName: "src-uri" | "dest-uri",
+  p: RawParameter,
+  diagnostics: Diagnostic[],
+  sourceFileId: SourceFileId | undefined,
+  hostId: HostId,
+  vhostId: VhostId,
+): string | undefined {
+  if (raw === undefined) return undefined;
+  if (typeof raw === "string") {
+    // Trim so a whitespace-only scalar behaves like the "no URI at all" case
+    // rather than being silently accepted and later rejected by parseAmqpUri.
+    const trimmed = raw.trim();
+    return trimmed.length > 0 ? trimmed : undefined;
+  }
+  if (Array.isArray(raw)) {
+    if (raw.length === 0) {
+      diagnostics.push({
+        severity: "warning",
+        code: "runtime-params.shovel-uri-empty-list",
+        message: `Shovel '${p.name}' has an empty '${fieldName}' array.`,
+        sourceFileId,
+        hostId,
+        vhostId,
+      });
+      return undefined;
+    }
+    // Trim strings before selection so a whitespace-only entry is treated the
+    // same as an empty string / non-string entry — the caller's URI parser
+    // would reject it anyway, but here we surface it as a skipped entry so the
+    // diagnostic accurately reports what was unusable.
+    const strings: string[] = [];
+    for (const item of raw) {
+      if (typeof item !== "string") continue;
+      const trimmed = item.trim();
+      if (trimmed.length === 0) continue;
+      strings.push(trimmed);
+    }
+    if (strings.length === 0) {
+      diagnostics.push({
+        severity: "warning",
+        code: "runtime-params.shovel-uri-invalid-list",
+        message: `Shovel '${p.name}' '${fieldName}' array has no usable string entries.`,
+        sourceFileId,
+        hostId,
+        vhostId,
+      });
+      return undefined;
+    }
+    if (strings.length < raw.length) {
+      const skipped = raw.length - strings.length;
+      diagnostics.push({
+        severity: "info",
+        code: "runtime-params.shovel-uri-mixed-list",
+        message: `Shovel '${p.name}' '${fieldName}' array had ${skipped} unusable entrie(s) (non-string or empty/whitespace) that were skipped.`,
+        sourceFileId,
+        hostId,
+        vhostId,
+      });
+    }
+    return strings[0];
   }
   return undefined;
 }
