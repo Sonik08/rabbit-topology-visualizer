@@ -430,6 +430,74 @@ describe("TopologyGraphCanvas pipeline — shovel-chain end-to-end regression vi
     expect(focused!.focusMissing).toBe(false);
   });
 
+  it("branching regression: focus on the source of a fan-out exchange preserves every downstream branch through composeFocusedTopology", () => {
+    // Extend the shovel-chain fixture with an alternate downstream queue so
+    // exchange:a:x3 branches into TWO destinations — queue:a:q1 (existing) and
+    // shovel:a:s1 → queue:b:q2. A focused view rooted at x3 must keep both
+    // branches; a wiring bug that only followed the first outgoing edge would
+    // drop one and fail this assertion.
+    const fixture = shovelChainFixture();
+    fixture.nodes.push({
+      id: "queue:a:branch",
+      kind: "queue",
+      label: "branch.q",
+      data: { hostId: "host:a", vhostId: "vhost:a:/" },
+    });
+    fixture.edges.push(
+      { id: "c:vhost-a->branch", from: "vhost:a:/", to: "queue:a:branch", kind: "contains" },
+      { id: "b:x3->branch", from: "exchange:a:x3", to: "queue:a:branch", kind: "binds", routingKey: "*" },
+    );
+    const { focused } = composeFocusedTopology({
+      graph: applyGraphFilters(fixture),
+      visibility: createEmptyVisibility(),
+      focusNodeId: "exchange:a:x3",
+      focusMaxDepth: 32,
+    });
+    expect(focused).toBeDefined();
+    const ids = new Set(focused!.nodes.map((n) => n.id));
+    // All THREE downstream branches survive: queue:a:q1 (original binding),
+    // queue:a:branch (the new fan-out), and queue:b:q2 via the shovel.
+    expect(ids.has("queue:a:q1")).toBe(true);
+    expect(ids.has("queue:a:branch")).toBe(true);
+    expect(ids.has("queue:b:q2")).toBe(true);
+    expect(ids.has("shovel:a:s1")).toBe(true);
+    // Every focused edge id that connects to x3 downstream is present.
+    const edgeIds = new Set(focused!.edges.map((e) => e.id));
+    expect(edgeIds.has("b:x3->q1")).toBe(true);
+    expect(edgeIds.has("b:x3->branch")).toBe(true);
+    expect(edgeIds.has("s:x3->s1")).toBe(true);
+  });
+
+  it("reset regression: clearing focusNodeId (compose call #2 without it) returns the full-topology renderInput — proves the canvas 'Show full topology' path restores everything", () => {
+    const fixture = shovelChainFixture();
+    // With focus: rendered subgraph is clipped.
+    const focused = composeFocusedTopology({
+      graph: applyGraphFilters(fixture),
+      visibility: createEmptyVisibility(),
+      focusNodeId: "queue:b:q2",
+      focusMaxDepth: 32,
+    });
+    expect(focused.focused).toBeDefined();
+    const focusedIds = new Set(focused.renderInput.nodes.map((n) => n.id));
+    expect(focusedIds.has("queue:a:q1")).toBe(true); // clipped view still reachable via x3
+
+    // Second compose call with focus cleared — mimics the canvas's
+    // "Show full topology" transition (`onFocusChange(undefined)`).
+    const unfocused = composeFocusedTopology({
+      graph: applyGraphFilters(fixture),
+      visibility: createEmptyVisibility(),
+    });
+    expect(unfocused.focused).toBeUndefined();
+    // Every original node is back in the render input — including any host:a
+    // entity that wasn't on the shovel chain.
+    const unfocusedIds = new Set(unfocused.renderInput.nodes.map((n) => n.id));
+    for (const n of fixture.nodes) expect(unfocusedIds.has(n.id)).toBe(true);
+    // Identity check: renderInput points at the visible payload when focus
+    // is off (not at a stale focused subgraph from the previous compose).
+    expect(unfocused.renderInput.nodes).toBe(unfocused.visible.nodes);
+    expect(unfocused.renderInput.edges).toBe(unfocused.visible.edges);
+  });
+
   it("depth truncation still applies on shovel chains: focusMaxDepth=1 keeps only the shovel's immediate neighbors and reports truncated=true", () => {
     const { focused } = composeFocusedTopology({
       graph: applyGraphFilters(shovelChainFixture()),
