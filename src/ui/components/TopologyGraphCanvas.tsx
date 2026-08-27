@@ -46,6 +46,24 @@ export interface TopologyGraphCanvasProps {
    * is unavailable). Test injection point.
    */
   workerClient?: ImportArchiveWorkerClient;
+  /**
+   * Controlled selection input. Presence of the prop (even set to
+   * `undefined`) puts the canvas in controlled mode: this value is
+   * authoritative, the internal fallback state is bypassed, and every
+   * canvas-initiated selection change is reported through
+   * {@link onSelectionChange}. Omitting the prop entirely leaves the canvas
+   * in uncontrolled mode with its own internal selection state. Wire from
+   * `App.tsx` to let sibling components (e.g. `EntitySearchBox`) drive the
+   * highlighted node.
+   */
+  selectedNodeId?: string;
+  /**
+   * Fires when the canvas would change the selection — clicking a node,
+   * clicking the pane, pressing "Clear selection". Callers running in
+   * controlled mode should update their state here; controlled-mode canvases
+   * with no callback silently no-op on canvas-initiated changes.
+   */
+  onSelectionChange?: (id: string | undefined) => void;
 }
 
 /**
@@ -58,14 +76,38 @@ export interface TopologyGraphCanvasProps {
  * task); this component just renders the graph and exposes React Flow's
  * built-in controls + minimap for navigation.
  */
-export function TopologyGraphCanvas({
-  result,
-  includeContains = false,
-  heightPx = 520,
-  workerClient,
-}: TopologyGraphCanvasProps): JSX.Element {
+export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Element {
+  // Detect controlled mode from the presence of the `selectedNodeId` prop
+  // BEFORE destructuring — passing `selectedNodeId={undefined}` explicitly
+  // still counts as controlled, matching the documented contract. If the
+  // parent controls the selection but forgets to wire `onSelectionChange`,
+  // canvas-initiated changes silently no-op (rather than corrupting an
+  // uncontrolled internal state); this is the same footgun as React's own
+  // controlled-input pattern.
+  const isControlled = Object.prototype.hasOwnProperty.call(props, "selectedNodeId");
+  const {
+    result,
+    includeContains = false,
+    heightPx = 520,
+    workerClient,
+    selectedNodeId: selectedNodeIdProp,
+    onSelectionChange,
+  } = props;
   const [showContains, setShowContains] = useState(includeContains);
-  const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
+  const [internalSelectedNodeId, setInternalSelectedNodeId] = useState<string | undefined>(undefined);
+  const selectedNodeId = isControlled ? selectedNodeIdProp : internalSelectedNodeId;
+  const setSelectedNodeId = useCallback(
+    (updater: string | undefined | ((prev: string | undefined) => string | undefined)) => {
+      if (isControlled) {
+        const next =
+          typeof updater === "function" ? updater(selectedNodeIdProp) : updater;
+        onSelectionChange?.(next);
+      } else {
+        setInternalSelectedNodeId(updater);
+      }
+    },
+    [isControlled, onSelectionChange, selectedNodeIdProp],
+  );
   const [filters, setFilters] = useState<FilterState>(() => createEmptyFilterState());
   const [visibility, setVisibility] = useState<VisibilityState>(() => createEmptyVisibility());
   const [configuredFlowPaused, setConfiguredFlowPaused] = useState(false);
