@@ -7,3 +7,4 @@ export * from "./cycles";
 export * from "./upstreamHighlight";
 export * from "./filterGraph";
 export * from "./pruneNeighborhood";
+export * from "./visibility";

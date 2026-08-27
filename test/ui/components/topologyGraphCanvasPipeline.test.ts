@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import { applyGraphFilters } from "../../../src/core/graph/filterGraph";
 import { computeUpstreamHighlight } from "../../../src/core/graph/upstreamHighlight";
+import {
+  applyVisibility,
+  createEmptyVisibility,
+  hideNodes,
+  isolateNeighborhood,
+  restoreNodes,
+} from "../../../src/core/graph/visibility";
 import type { BuildGraphResult } from "../../../src/core/graph/buildGraph";
 import type { GraphEdge, GraphNode } from "../../../src/core/model";
 import { toReactFlowElements } from "../../../src/ui/components/topologyGraphElements";
@@ -94,6 +101,66 @@ describe("TopologyGraphCanvas pipeline — filters affect rendered elements", ()
       expect(e.data.kind).toBe("binds");
     }
     expect(flow.edges).toHaveLength(3);
+  });
+});
+
+describe("TopologyGraphCanvas pipeline — broad filters compose with hide/restore + isolation", () => {
+  it("host filter drops entities from every downstream stage, and hide/restore on the filtered graph doesn't resurrect them", () => {
+    // Broad filter → only host:a survives; host:b + queue:b:q2 are gone even
+    // before the visibility overlay runs.
+    const filtered = applyGraphFilters(pipelineFixture(), {
+      hostIds: new Set(["host:a"]),
+    });
+    let visibility = createEmptyVisibility();
+    // Hiding a survivor works.
+    visibility = hideNodes(visibility, ["queue:a:q1"]);
+    const outHidden = applyVisibility(filtered, visibility);
+    const idsHidden = new Set(outHidden.nodes.map((n) => n.id));
+    expect(idsHidden.has("queue:a:q1")).toBe(false);
+    expect(idsHidden.has("queue:b:q2")).toBe(false); // filter-hidden stays hidden
+    // effectivelyHidden lists ONLY the explicit hide (filter-removed nodes are
+    // not part of the pre-visibility graph, so they can't be surfaced as
+    // "restore me" pills — matches the canvas panel behaviour).
+    expect([...outHidden.effectivelyHidden]).toEqual(["queue:a:q1"]);
+    // Restore round-trip against the SAME filtered graph.
+    const restored = restoreNodes(filtered, visibility, ["queue:a:q1"]);
+    const outRestored = applyVisibility(filtered, restored);
+    const idsRestored = new Set(outRestored.nodes.map((n) => n.id));
+    expect(idsRestored.has("queue:a:q1")).toBe(true);
+    expect(idsRestored.has("queue:b:q2")).toBe(false);
+    for (const e of outRestored.edges) {
+      expect(idsRestored.has(e.from)).toBe(true);
+      expect(idsRestored.has(e.to)).toBe(true);
+    }
+  });
+
+  it("neighborhood isolation composes with a broad host filter — isolation membership is computed against the filtered graph, so restoring an isolation-hidden id clears isolation on the SAME graph", () => {
+    const filtered = applyGraphFilters(pipelineFixture(), {
+      hostIds: new Set(["host:a"]),
+    });
+    // Depth-1 isolation on q1 keeps q1 + its immediate upstream (x3) + host/vhost ancestors.
+    const isolated = isolateNeighborhood(createEmptyVisibility(), "queue:a:q1", {
+      depth: 1,
+      direction: "both",
+    });
+    const outIsolated = applyVisibility(filtered, isolated);
+    const idsIsolated = new Set(outIsolated.nodes.map((n) => n.id));
+    expect(idsIsolated.has("queue:a:q1")).toBe(true);
+    expect(idsIsolated.has("exchange:a:x3")).toBe(true);
+    // x1 is two hops away and NOT in the neighborhood — it must show up in
+    // effectivelyHidden so the panel's pill list can offer a restore.
+    expect(idsIsolated.has("exchange:a:x1")).toBe(false);
+    expect(outIsolated.effectivelyHidden.has("exchange:a:x1")).toBe(true);
+    // Restoring x1 against the FILTERED graph correctly clears isolation because
+    // x1 is not in the depth-1 neighborhood of the filtered graph.
+    const restored = restoreNodes(filtered, isolated, ["exchange:a:x1"]);
+    expect(restored.isolatedFocus).toBeUndefined();
+    const outRestored = applyVisibility(filtered, restored);
+    const idsRestored = new Set(outRestored.nodes.map((n) => n.id));
+    expect(idsRestored.has("exchange:a:x1")).toBe(true);
+    // The broadly-filtered host:b entities remain gone — the visibility
+    // overlay never resurrects filter-removed nodes.
+    expect(idsRestored.has("queue:b:q2")).toBe(false);
   });
 });
 

@@ -20,6 +20,12 @@ import {
   TopologyFiltersPanel,
   type FilterState,
 } from "./TopologyFiltersPanel";
+import { TopologyVisibilityPanel } from "./TopologyVisibilityPanel";
+import {
+  applyVisibility,
+  createEmptyVisibility,
+  type VisibilityState,
+} from "../../core/graph/visibility";
 import { toReactFlowElements, type FlowEdge, type FlowNode } from "./topologyGraphElements";
 import { useTopologyGraph } from "../hooks/useTopologyGraph";
 
@@ -57,6 +63,7 @@ export function TopologyGraphCanvas({
   const [showContains, setShowContains] = useState(includeContains);
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
   const [filters, setFilters] = useState<FilterState>(() => createEmptyFilterState());
+  const [visibility, setVisibility] = useState<VisibilityState>(() => createEmptyVisibility());
 
   // Resolve the worker client once so the hook effect deps stay stable —
   // `getSharedTopologyWorkerClient()` is a lazy singleton so this is free.
@@ -68,13 +75,25 @@ export function TopologyGraphCanvas({
   const { rawGraph, graph, highlight, buildLoading, highlightLoading, selectedNode } =
     useTopologyGraph({ result, filters, selectedNodeId, workerClient: client });
 
+  // Visibility overlay runs synchronously on top of the filtered graph — it
+  // is a pure user-driven allow/deny list so an off-thread trip isn't worth
+  // the state-management cost. `applyVisibility` is O(V+E) and reversible.
+  const visible = useMemo(() => applyVisibility(graph, visibility), [graph, visibility]);
+
   const flowGraph = useMemo(
     () =>
-      toReactFlowElements(graph, {
-        includeContains: showContains,
-        highlight: highlight.nodeIds.size > 0 ? highlight : undefined,
-      }),
-    [graph, showContains, highlight],
+      toReactFlowElements(
+        {
+          nodes: visible.nodes,
+          edges: visible.edges,
+          diagnostics: visible.diagnostics,
+        },
+        {
+          includeContains: showContains,
+          highlight: highlight.nodeIds.size > 0 ? highlight : undefined,
+        },
+      ),
+    [visible, showContains, highlight],
   );
 
   const onNodeClick = useCallback<NodeMouseHandler>((_, node) => {
@@ -122,6 +141,14 @@ export function TopologyGraphCanvas({
         {!buildLoading && !highlightLoading && (selectedNodeId ? " · click background or the same node again to clear selection" : " · click a queue or exchange to highlight its upstream path")}
       </p>
       <TopologyFiltersPanel graph={rawGraph} filters={filters} onChange={setFilters} />
+      <TopologyVisibilityPanel
+        graph={graph}
+        visibility={visibility}
+        counts={visible.counts}
+        effectivelyHidden={visible.effectivelyHidden}
+        selectedNodeId={selectedNodeId}
+        onChange={setVisibility}
+      />
       {selectionSummary && (
         <div style={selectionBarStyle} data-testid="topology-graph-selection-summary">
           <span>{selectionSummary}</span>
