@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import type { BuildGraphResult } from "../../../src/core/graph/buildGraph";
@@ -61,6 +62,23 @@ function renderPanel(opts: RenderOptions = {}) {
     />,
   );
   return { graph, onChange };
+}
+
+function StatefulPanel({ graph }: { graph: BuildGraphResult }): JSX.Element {
+  const [visibility, setVisibility] = useState<VisibilityState>(() =>
+    createEmptyVisibility(),
+  );
+  const applied = applyVisibility(graph, visibility);
+  return (
+    <TopologyVisibilityPanel
+      graph={graph}
+      visibility={visibility}
+      counts={applied.counts}
+      effectivelyHidden={applied.effectivelyHidden}
+      selectedNodeId={undefined}
+      onChange={setVisibility}
+    />
+  );
 }
 
 /**
@@ -253,17 +271,58 @@ describe("TopologyVisibilityPanel — searchable entity list", () => {
 });
 
 describe("TopologyVisibilityPanel — bulk deselection for filtered matches (mandatory regression)", () => {
-  it("'Hide all matches' and 'Show all matches' are disabled while the search is empty or whitespace-only", () => {
+  it("bulk actions are disabled when there is nothing safe or useful to change", () => {
     renderPanel();
     const hide = screen.getByTestId("topology-visibility-hide-all-matches") as HTMLButtonElement;
     const show = screen.getByTestId("topology-visibility-show-all-matches") as HTMLButtonElement;
     expect(hide.disabled).toBe(true);
     expect(show.disabled).toBe(true);
-    // Whitespace-only query stays disabled.
+    // Whitespace-only search cannot activate hide-all; show remains disabled
+    // because there are no hidden searchable entities to restore.
     fireEvent.change(screen.getByTestId("topology-visibility-search"), {
       target: { value: "   " },
     });
     expect(hide.disabled).toBe(true);
+    expect(show.disabled).toBe(true);
+  });
+
+  it("'Show all matches' restores every hidden queue/exchange when the search is empty, while preserving hidden structural nodes", () => {
+    const initial = hideNodes(createEmptyVisibility(), [
+      "host:h",
+      "queue:h:q2",
+      "exchange:h:x2",
+    ]);
+    const { onChange } = renderPanel({ visibility: initial });
+    const show = screen.getByTestId(
+      "topology-visibility-show-all-matches",
+    ) as HTMLButtonElement;
+    expect(show.disabled).toBe(false);
+    expect(show.textContent).toMatch(/\(2\)/);
+    fireEvent.click(show);
+    const next = onChange.mock.calls[0]![0];
+    expect(next.hiddenNodeIds.has("queue:h:q2")).toBe(false);
+    expect(next.hiddenNodeIds.has("exchange:h:x2")).toBe(false);
+    expect(next.hiddenNodeIds.has("host:h")).toBe(true);
+  });
+
+  it("a real Hide-all then Show-all interaction restores the same matches after the controlled panel rerenders", () => {
+    render(<StatefulPanel graph={graphFixture()} />);
+    fireEvent.change(screen.getByTestId("topology-visibility-search"), {
+      target: { value: "audit" },
+    });
+    fireEvent.click(screen.getByTestId("topology-visibility-hide-all-matches"));
+    expect(screen.getByTestId("topology-visibility-counts").textContent).toMatch(
+      /4\/6 nodes/,
+    );
+    const show = screen.getByTestId(
+      "topology-visibility-show-all-matches",
+    ) as HTMLButtonElement;
+    expect(show.disabled).toBe(false);
+    expect(show.textContent).toMatch(/\(2\)/);
+    fireEvent.click(show);
+    expect(screen.getByTestId("topology-visibility-counts").textContent).toMatch(
+      /6\/6 nodes/,
+    );
     expect(show.disabled).toBe(true);
   });
 

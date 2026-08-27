@@ -113,20 +113,25 @@ export function TopologyVisibilityPanel({
     if (ids.length === 0) return;
     onChange(hideNodes(visibility, ids));
   };
+  const hiddenMatchingEntityIds = useMemo(
+    () =>
+      filteredEntities
+        .filter((n) => effectivelyHidden.has(n.id))
+        .map((n) => n.id),
+    [effectivelyHidden, filteredEntities],
+  );
+
   /**
-   * Companion action: bulk-restore every match — useful after a
+   * Companion action: bulk-restore every hidden match — useful after a
    * "Hide all matches" or when the user searches for a substring shared by a
-   * batch of already-hidden nodes. Reuses `restoreNodes` so isolation-hidden
-   * matches also come back (clearing `isolatedFocus` when needed, same
-   * semantics as the per-pill Show button).
+   * batch of already-hidden nodes. Unlike bulk hide, an empty search is safe:
+   * it means "show every hidden queue/exchange" and cannot remove data. Reuses
+   * `restoreNodes` so isolation-hidden matches also come back (clearing
+   * `isolatedFocus` when needed, same semantics as the per-pill Show button).
    */
   const onShowAllMatches = (): void => {
-    if (!hasActiveQuery) return;
-    const ids = filteredEntities
-      .filter((n) => effectivelyHidden.has(n.id))
-      .map((n) => n.id);
-    if (ids.length === 0) return;
-    onChange(restoreNodes(graph, visibility, ids));
+    if (hiddenMatchingEntityIds.length === 0) return;
+    onChange(restoreNodes(graph, visibility, hiddenMatchingEntityIds));
   };
 
   return (
@@ -228,16 +233,16 @@ export function TopologyVisibilityPanel({
           <button
             type="button"
             onClick={onShowAllMatches}
-            disabled={!hasActiveQuery}
+            disabled={hiddenMatchingEntityIds.length === 0}
             data-testid="topology-visibility-show-all-matches"
             title={
               hasActiveQuery
-                ? `Restore every hidden queue/exchange matching "${normalizedQuery}"`
-                : "Enter a search term to enable bulk restore"
+                ? `Restore every hidden queue/exchange matching "${normalizedQuery}" (${hiddenMatchingEntityIds.length})`
+                : `Restore every hidden queue/exchange (${hiddenMatchingEntityIds.length})`
             }
             style={bulkButtonStyle}
           >
-            Show all matches
+            Show all matches ({hiddenMatchingEntityIds.length})
           </button>
         </div>
         <div data-testid="topology-visibility-entity-list" style={entityListStyle}>
