@@ -1,0 +1,59 @@
+{
+  "rabbit_version": "3.8.35",
+  "product_name": "RabbitMQ",
+  "product_version": "3.8.35",
+  "users": [
+    {
+      "name": "example-user",
+      "password_hash": "REDACTED",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": "administrator"
+    }
+  ],
+  "vhosts": [
+    { "name": "/" },
+    { "name": "legacy" }
+  ],
+  "permissions": [
+    {
+      "user": "example-user",
+      "vhost": "legacy",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "parameters": [
+    {
+      "value": {
+        "src-uri": "amqp://REDACTED@remote-legacy.example.internal:5672",
+        "src-exchange": "legacy.out",
+        "src-exchange-key": "#",
+        "dest-uri": "amqp://REDACTED@local-legacy.example.internal:5672",
+        "dest-exchange": "legacy.in",
+        "ack-mode": "on-confirm"
+      },
+      "vhost": "legacy",
+      "component": "shovel",
+      "name": "legacy-shovel"
+    }
+  ],
+  "policies": [],
+  "queues": [
+    { "name": "legacy.q", "vhost": "legacy", "durable": true, "arguments": {} }
+  ],
+  "exchanges": [
+    { "name": "legacy.in", "vhost": "legacy", "type": "topic", "durable": true, "auto_delete": false, "internal": false, "arguments": {} },
+    { "name": "legacy.out", "vhost": "legacy", "type": "topic", "durable": true, "auto_delete": false, "internal": false, "arguments": {} }
+  ],
+  "bindings": [
+    {
+      "source": "legacy.in",
+      "vhost": "legacy",
+      "destination": "legacy.q",
+      "destination_type": "queue",
+      "routing_key": "legacy.*",
+      "arguments": {}
+    }
+  ]
+}

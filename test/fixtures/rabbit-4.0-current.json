@@ -1,0 +1,101 @@
+{
+  "rabbit_version": "4.0.2",
+  "rabbitmq_version": "4.0.2",
+  "product_name": "RabbitMQ",
+  "product_version": "4.0.2",
+  "users": [
+    {
+      "name": "example-user",
+      "password_hash": "REDACTED",
+      "hashing_algorithm": "rabbit_password_hashing_sha256",
+      "tags": ["administrator", "monitoring"],
+      "limits": {}
+    }
+  ],
+  "vhosts": [
+    {
+      "name": "/",
+      "description": "Default vhost",
+      "tags": ["default"],
+      "default_queue_type": "quorum",
+      "metadata": {
+        "description": "Default vhost",
+        "tags": ["default"],
+        "default_queue_type": "quorum"
+      }
+    },
+    {
+      "name": "billing",
+      "description": "Billing pipeline",
+      "tags": ["prod", "billing"],
+      "default_queue_type": "quorum",
+      "metadata": {
+        "description": "Billing pipeline",
+        "tags": ["prod", "billing"],
+        "default_queue_type": "quorum"
+      }
+    }
+  ],
+  "permissions": [
+    {
+      "user": "example-user",
+      "vhost": "billing",
+      "configure": ".*",
+      "write": ".*",
+      "read": ".*"
+    }
+  ],
+  "parameters": [
+    {
+      "value": {
+        "src-uri": [
+          "amqp://REDACTED@current-primary.example.internal:5672/billing",
+          "amqp://REDACTED@current-backup.example.internal:5672/billing"
+        ],
+        "src-queue": "billing.out",
+        "dest-uri": "amqp://REDACTED@current-local.example.internal:5672/billing",
+        "dest-queue": "billing.in",
+        "ack-mode": "on-confirm"
+      },
+      "vhost": "billing",
+      "component": "shovel",
+      "name": "current-shovel"
+    }
+  ],
+  "policies": [],
+  "queues": [
+    {
+      "name": "billing.in",
+      "vhost": "billing",
+      "durable": true,
+      "arguments": { "x-queue-type": "quorum" }
+    },
+    {
+      "name": "billing.out",
+      "vhost": "billing",
+      "durable": true,
+      "arguments": { "x-queue-type": "quorum" }
+    }
+  ],
+  "exchanges": [
+    {
+      "name": "billing.in",
+      "vhost": "billing",
+      "type": "direct",
+      "durable": true,
+      "auto_delete": false,
+      "internal": false,
+      "arguments": {}
+    }
+  ],
+  "bindings": [
+    {
+      "source": "billing.in",
+      "vhost": "billing",
+      "destination": "billing.in",
+      "destination_type": "queue",
+      "routing_key": "billing",
+      "arguments": {}
+    }
+  ]
+}

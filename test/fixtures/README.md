@@ -34,3 +34,18 @@ across shovel/federation, and cross-vhost queue resolution.
   `*.example.internal` hostnames — no credentials, no real
   infrastructure names. Use this fixture as the failing-shape
   regression pin for the parser and buildGraph pipeline.
+
+- `rabbit-3.8-legacy.json` — representative legacy shape from the
+  RabbitMQ 3.8 line: `tags` as a scalar string on the user record,
+  scalar `src-uri` / `dest-uri` on the shovel parameter, classic
+  queues without an explicit `x-queue-type`. Pins that the parser
+  still tolerates the older export shape and does not regress on
+  simpler payloads.
+
+- `rabbit-4.0-current.json` — representative current shape from the
+  RabbitMQ 4.x line: rich vhost fields (`description`, `tags` array,
+  `default_queue_type`, nested `metadata`), quorum queues via
+  `arguments["x-queue-type"] = "quorum"`, and a shovel that mixes an
+  HA-form `src-uri` array with a scalar `dest-uri`. Pins that
+  additive vhost fields do not raise warnings and that the fixture
+  parses end-to-end without credential leakage.
