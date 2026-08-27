@@ -329,6 +329,127 @@ describe("TopologyGraphCanvas pipeline — focused mode composes with filters + 
   });
 });
 
+/**
+ * Fixture that adds a cross-host shovel chain on top of the base pipeline
+ * fixture: `exchange:a:x3 → shovel:a:s1 → queue:b:q2`. Lets the shovel-chain
+ * regressions exercise a full `exchange → exchange → shovel → queue` message
+ * flow through the shared composition (matching the task's canonical
+ * `exchange → exchange → shovel → exchange → queue` example, minus the trailing
+ * exchange for concision).
+ */
+function shovelChainFixture(): BuildGraphResult {
+  const base = pipelineFixture();
+  base.nodes.push({
+    id: "shovel:a:s1",
+    kind: "shovel",
+    label: "a-to-b",
+    data: { hostId: "host:a", vhostId: "vhost:a:/" },
+  });
+  base.edges.push(
+    { id: "c:vhost-a->s1", from: "vhost:a:/", to: "shovel:a:s1", kind: "contains" },
+    { id: "s:x3->s1", from: "exchange:a:x3", to: "shovel:a:s1", kind: "shovels" },
+    { id: "s:s1->q2", from: "shovel:a:s1", to: "queue:b:q2", kind: "shovels" },
+  );
+  return base;
+}
+
+describe("TopologyGraphCanvas pipeline — shovel-chain end-to-end regression via composeFocusedTopology", () => {
+  it("focus on the downstream queue (queue:b:q2) walks the full shovel chain upstream: queue:b:q2 ← shovel:a:s1 ← exchange:a:x3 ← exchange:a:x2 ← exchange:a:x1", () => {
+    const { focused } = composeFocusedTopology({
+      graph: applyGraphFilters(shovelChainFixture()),
+      visibility: createEmptyVisibility(),
+      focusNodeId: "queue:b:q2",
+      focusMaxDepth: 32,
+    });
+    expect(focused).toBeDefined();
+    const ids = new Set(focused!.nodes.map((n) => n.id));
+    // Every routing hop upstream of queue:b:q2 survives.
+    expect(ids.has("queue:b:q2")).toBe(true);
+    expect(ids.has("shovel:a:s1")).toBe(true);
+    expect(ids.has("exchange:a:x3")).toBe(true);
+    expect(ids.has("exchange:a:x2")).toBe(true);
+    expect(ids.has("exchange:a:x1")).toBe(true);
+    // Contains ancestry preserved so operators see BOTH hosts + vhosts that
+    // participate in the shovel chain.
+    expect(ids.has("host:a")).toBe(true);
+    expect(ids.has("vhost:a:/")).toBe(true);
+    expect(ids.has("host:b")).toBe(true);
+    expect(ids.has("vhost:b:/")).toBe(true);
+    // Unrelated queue on host:a is not on this shovel chain.
+    expect(ids.has("queue:a:q1")).toBe(true); // x3 → q1 is also downstream of x3 — kept
+    // Focused edge set includes both `shovels` edges.
+    const edgeIds = new Set(focused!.edges.map((e) => e.id));
+    expect(edgeIds.has("s:x3->s1")).toBe(true);
+    expect(edgeIds.has("s:s1->q2")).toBe(true);
+  });
+
+  it("focus on a middle exchange (exchange:a:x2) reaches BOTH upstream (x1) AND downstream (x3, q1, shovel, queue:b:q2) — proves the direction:'both' traversal", () => {
+    const { focused } = composeFocusedTopology({
+      graph: applyGraphFilters(shovelChainFixture()),
+      visibility: createEmptyVisibility(),
+      focusNodeId: "exchange:a:x2",
+      focusMaxDepth: 32,
+    });
+    expect(focused).toBeDefined();
+    const ids = new Set(focused!.nodes.map((n) => n.id));
+    // Upstream from x2: x1
+    expect(ids.has("exchange:a:x1")).toBe(true);
+    // Downstream from x2: x3 → q1 AND x3 → shovel → queue:b:q2
+    expect(ids.has("exchange:a:x3")).toBe(true);
+    expect(ids.has("queue:a:q1")).toBe(true);
+    expect(ids.has("shovel:a:s1")).toBe(true);
+    expect(ids.has("queue:b:q2")).toBe(true);
+    // Every routing edge on the chain survives — no dangling handles for
+    // React Flow when this focused subgraph is rendered.
+    const flow = toReactFlowElements(focused!, { includeContains: false });
+    const renderedNodeIds = new Set(flow.nodes.map((n) => n.id));
+    for (const e of flow.edges) {
+      expect(renderedNodeIds.has(e.source)).toBe(true);
+      expect(renderedNodeIds.has(e.target)).toBe(true);
+    }
+  });
+
+  it("focus on the shovel node (shovel:a:s1) itself walks BOTH the incoming exchange chain and the outgoing destination queue", () => {
+    const { focused } = composeFocusedTopology({
+      graph: applyGraphFilters(shovelChainFixture()),
+      visibility: createEmptyVisibility(),
+      focusNodeId: "shovel:a:s1",
+      focusMaxDepth: 32,
+    });
+    expect(focused).toBeDefined();
+    const ids = new Set(focused!.nodes.map((n) => n.id));
+    // Upstream from the shovel: exchange:a:x3 → x2 → x1
+    expect(ids.has("exchange:a:x3")).toBe(true);
+    expect(ids.has("exchange:a:x2")).toBe(true);
+    expect(ids.has("exchange:a:x1")).toBe(true);
+    // Downstream from the shovel: queue:b:q2
+    expect(ids.has("queue:b:q2")).toBe(true);
+    // The shovel itself is the focus target.
+    expect(ids.has("shovel:a:s1")).toBe(true);
+    // Focus is not "missing".
+    expect(focused!.focusMissing).toBe(false);
+  });
+
+  it("depth truncation still applies on shovel chains: focusMaxDepth=1 keeps only the shovel's immediate neighbors and reports truncated=true", () => {
+    const { focused } = composeFocusedTopology({
+      graph: applyGraphFilters(shovelChainFixture()),
+      visibility: createEmptyVisibility(),
+      focusNodeId: "shovel:a:s1",
+      focusMaxDepth: 1,
+    });
+    expect(focused).toBeDefined();
+    const ids = new Set(focused!.nodes.map((n) => n.id));
+    // 1 hop each side: exchange:a:x3 (upstream) + queue:b:q2 (downstream) + focus.
+    expect(ids.has("shovel:a:s1")).toBe(true);
+    expect(ids.has("exchange:a:x3")).toBe(true);
+    expect(ids.has("queue:b:q2")).toBe(true);
+    // Excluded by depth cap.
+    expect(ids.has("exchange:a:x2")).toBe(false);
+    expect(ids.has("exchange:a:x1")).toBe(false);
+    expect(focused!.truncated).toBe(true);
+  });
+});
+
 describe("TopologyGraphCanvas pipeline — bulk visibility hide layered on broad filters composes correctly", () => {
   it("bulk-hiding the ids matching a search substring drops every match from applyVisibility while leaving non-matches + filter-removed nodes untouched", () => {
     // Broad filter to host:a survivors, then bulk-hide the ids whose label
