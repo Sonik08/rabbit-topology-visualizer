@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { BuildGraphResult } from "../../../src/core/graph/buildGraph";
-import type { GraphEdge, GraphNode } from "../../../src/core/model";
+import type { EndpointRef, GraphEdge, GraphNode } from "../../../src/core/model";
 import { toReactFlowElements } from "../../../src/ui/components/topologyGraphElements";
 
 function graph(nodes: GraphNode[], edges: GraphEdge[]): BuildGraphResult {
@@ -35,8 +35,11 @@ describe("toReactFlowElements", () => {
     expect(byId.get("exchange:a:x1")!.position.x).toBeLessThan(
       byId.get("queue:a:q1")!.position.x,
     );
-    // Labels are carried through and node kind is preserved.
-    expect(byId.get("queue:a:q1")!.data.label).toBe("q1");
+    // Labels are carried through and node kind is preserved. The fixture
+    // omits canonical `vhostId` on the queue, so the safe `unknown vhost`
+    // fallback appears as a suffix — the badge is always emitted for a
+    // queue/exchange/shovel/federation node so missing metadata is visible.
+    expect(byId.get("queue:a:q1")!.data.label).toBe("q1 · unknown vhost");
     expect(byId.get("queue:a:q1")!.data.kind).toBe("queue");
   });
 
@@ -106,7 +109,9 @@ describe("toReactFlowElements", () => {
     );
     expect(byId.get("exchange:a:t")!.data.flowType).toBe("exchange:topic");
     expect(byId.get("exchange:a:t")!.data.subtypeBadge).toBe("[topic]");
-    expect(byId.get("exchange:a:t")!.data.label).toBe("[topic] orders");
+    // Fixture omits `vhostId` → the safe `unknown vhost` fallback appears as
+    // a badge suffix so the operator sees the missing metadata explicitly.
+    expect(byId.get("exchange:a:t")!.data.label).toBe("[topic] orders · unknown vhost");
     expect(byId.get("exchange:a:d")!.data.flowType).toBe("exchange:direct");
     expect(byId.get("exchange:a:f")!.data.flowType).toBe("exchange:fanout");
     expect(byId.get("exchange:a:h")!.data.flowType).toBe("exchange:headers");
@@ -141,9 +146,10 @@ describe("toReactFlowElements", () => {
       toReactFlowElements(graph(nodes, [])).nodes.map((n) => [n.id, n]),
     );
     expect(byId.get("queue:a:c")!.data.flowType).toBe("queue:classic");
-    // Classic + durable → no badge, label is untouched.
+    // Classic + durable → no subtype badge; fixture omits `vhostId` so the
+    // safe `unknown vhost` fallback suffix appears on the label.
     expect(byId.get("queue:a:c")!.data.subtypeBadge).toBeUndefined();
-    expect(byId.get("queue:a:c")!.data.label).toBe("orders");
+    expect(byId.get("queue:a:c")!.data.label).toBe("orders · unknown vhost");
     expect(byId.get("queue:a:q")!.data.flowType).toBe("queue:quorum");
     expect(byId.get("queue:a:q")!.data.subtypeBadge).toBe("[quorum]");
     expect(byId.get("queue:a:s")!.data.flowType).toBe("queue:stream");
@@ -400,5 +406,726 @@ describe("toReactFlowElements — configured-flow rendering (boundary label + pa
     );
     expect(byId.get("s-in")!.animated).toBe(false);
     expect(byId.get("f-out")!.animated).toBe(false);
+  });
+});
+
+describe("toReactFlowElements — vhost badge & context", () => {
+  function baseGraph(): { nodes: GraphNode[]; edges: GraphEdge[] } {
+    const nodes: GraphNode[] = [
+      { id: "host:a", kind: "host", label: "rabbit-a", data: { id: "host:a", name: "rabbit-a" } },
+      {
+        id: "vhost:a:/",
+        kind: "vhost",
+        label: "/",
+        data: { id: "vhost:a:/", hostId: "host:a", name: "/" },
+      },
+      {
+        id: "vhost:a:orders",
+        kind: "vhost",
+        label: "orders",
+        data: { id: "vhost:a:orders", hostId: "host:a", name: "orders" },
+      },
+      {
+        id: "exchange:a:x1",
+        kind: "exchange",
+        label: "x1",
+        data: {
+          id: "exchange:a:x1",
+          hostId: "host:a",
+          vhostId: "vhost:a:/",
+          name: "x1",
+          type: "topic",
+        },
+      },
+      {
+        id: "queue:a:q1",
+        kind: "queue",
+        label: "q1",
+        data: {
+          id: "queue:a:q1",
+          hostId: "host:a",
+          vhostId: "vhost:a:orders",
+          name: "q1",
+          durable: true,
+        },
+      },
+      {
+        id: "shovel:a:s1",
+        kind: "shovel",
+        label: "s1",
+        data: {
+          id: "shovel:a:s1",
+          hostId: "host:a",
+          vhostId: "vhost:a:orders",
+          name: "s1",
+          source: {},
+          destination: {},
+        },
+      },
+      {
+        id: "federation:a:f1",
+        kind: "federation",
+        label: "f1",
+        data: {
+          id: "federation:a:f1",
+          hostId: "host:a",
+          vhostId: "vhost:a:/",
+          name: "f1",
+          upstream: {},
+          downstream: {},
+        },
+      },
+    ];
+    return { nodes, edges: [] };
+  }
+
+  it("resolves a compact vhost badge on queue, exchange, shovel, and federation nodes and exposes context in data", () => {
+    const g = baseGraph();
+    const byId = new Map(
+      toReactFlowElements({ ...g, diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    const exchange = byId.get("exchange:a:x1")!;
+    expect(exchange.data.vhostBadge).toBe("/");
+    expect(exchange.data.vhostContext).toMatchObject({
+      vhostId: "vhost:a:/",
+      vhostName: "/",
+      hostId: "host:a",
+      hostName: "rabbit-a",
+      isDefault: true,
+      ambiguous: false,
+      unknown: false,
+    });
+    expect(exchange.data.vhostTooltip).toBe("vhost / on host rabbit-a");
+    // Label includes badge as a compact suffix without disturbing subtype badge.
+    expect(exchange.data.label).toBe("[topic] x1 · /");
+
+    const queue = byId.get("queue:a:q1")!;
+    expect(queue.data.vhostBadge).toBe("orders");
+    expect(queue.data.vhostContext?.isDefault).toBe(false);
+    expect(queue.data.label).toBe("q1 · orders");
+
+    const shovel = byId.get("shovel:a:s1")!;
+    expect(shovel.data.vhostBadge).toBe("orders");
+    expect(shovel.data.vhostContext?.vhostName).toBe("orders");
+
+    const federation = byId.get("federation:a:f1")!;
+    expect(federation.data.vhostBadge).toBe("/");
+    expect(federation.data.vhostContext?.hostName).toBe("rabbit-a");
+  });
+
+  it("skips vhost badge/context on host and vhost nodes (they have no ambient vhost to surface)", () => {
+    const g = baseGraph();
+    const byId = new Map(
+      toReactFlowElements({ ...g, diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    expect(byId.get("host:a")!.data.vhostContext).toBeUndefined();
+    expect(byId.get("host:a")!.data.vhostBadge).toBeUndefined();
+    expect(byId.get("vhost:a:/")!.data.vhostContext).toBeUndefined();
+    expect(byId.get("vhost:a:orders")!.data.vhostBadge).toBeUndefined();
+  });
+
+  it("includes host prefix in the badge only when the same vhost name exists on multiple hosts", () => {
+    const nodes: GraphNode[] = [
+      { id: "host:a", kind: "host", label: "rabbit-a", data: { name: "rabbit-a" } },
+      { id: "host:b", kind: "host", label: "rabbit-b", data: { name: "rabbit-b" } },
+      {
+        id: "vhost:a:orders",
+        kind: "vhost",
+        label: "orders",
+        data: { hostId: "host:a", name: "orders" },
+      },
+      {
+        id: "vhost:b:orders",
+        kind: "vhost",
+        label: "orders",
+        data: { hostId: "host:b", name: "orders" },
+      },
+      {
+        id: "vhost:a:audit",
+        kind: "vhost",
+        label: "audit",
+        data: { hostId: "host:a", name: "audit" },
+      },
+      {
+        id: "queue:a:orders:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:a", vhostId: "vhost:a:orders", name: "q" },
+      },
+      {
+        id: "queue:b:orders:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:b", vhostId: "vhost:b:orders", name: "q" },
+      },
+      {
+        id: "queue:a:audit:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:a", vhostId: "vhost:a:audit", name: "q" },
+      },
+    ];
+    const byId = new Map(
+      toReactFlowElements({ nodes, edges: [], diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    // Ambiguous vhost 'orders' → badge includes host prefix on both sides.
+    expect(byId.get("queue:a:orders:q")!.data.vhostBadge).toBe("rabbit-a/orders");
+    expect(byId.get("queue:a:orders:q")!.data.vhostContext?.ambiguous).toBe(true);
+    expect(byId.get("queue:b:orders:q")!.data.vhostBadge).toBe("rabbit-b/orders");
+    expect(byId.get("queue:b:orders:q")!.data.vhostContext?.ambiguous).toBe(true);
+    // Unique vhost 'audit' → badge stays compact (no host prefix).
+    expect(byId.get("queue:a:audit:q")!.data.vhostBadge).toBe("audit");
+    expect(byId.get("queue:a:audit:q")!.data.vhostContext?.ambiguous).toBe(false);
+    // Tooltip always spells out the host, even when the badge omits it.
+    expect(byId.get("queue:a:audit:q")!.data.vhostTooltip).toBe(
+      "vhost audit on host rabbit-a",
+    );
+  });
+
+  it("truncates long badge text with a collision-safe suffix while keeping the full name in the tooltip", () => {
+    const longName = "a".repeat(40);
+    const nodes: GraphNode[] = [
+      { id: "host:a", kind: "host", label: "rabbit-a", data: { name: "rabbit-a" } },
+      {
+        id: `vhost:a:${longName}`,
+        kind: "vhost",
+        label: longName,
+        data: { hostId: "host:a", name: longName },
+      },
+      {
+        id: "queue:a:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:a", vhostId: `vhost:a:${longName}`, name: "q" },
+      },
+    ];
+    const byId = new Map(
+      toReactFlowElements({ nodes, edges: [], diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    const q = byId.get("queue:a:q")!;
+    expect(q.data.vhostBadge!.length).toBeLessThanOrEqual(24);
+    // Truncated badges carry an ellipsis followed by a 4-hex-char stable hash
+    // suffix so distinct vhostIds never collide even when the human text
+    // shares a common prefix AND tail.
+    expect(q.data.vhostBadge).toMatch(/…[0-9a-f]{4}$/);
+    expect(q.data.vhostTooltip).toBe(`vhost ${longName} on host rabbit-a`);
+  });
+
+  it("produces distinct truncated badges for two long vhost names that share a common prefix on the same host (collision-safe suffix)", () => {
+    // Long vhost names on the same host that share the first ~30 characters.
+    // A naive `<prefix>…` truncation would collapse both to the SAME string.
+    const prefix = "org_service_orderprocessing_pipeline_";
+    const nameA = `${prefix}alpha_v1_release_20260831`;
+    const nameB = `${prefix}beta_v1_release_20260831`;
+    const nodes: GraphNode[] = [
+      { id: "host:a", kind: "host", label: "rabbit-a", data: { name: "rabbit-a" } },
+      {
+        id: "vhost:a:alpha",
+        kind: "vhost",
+        label: nameA,
+        data: { hostId: "host:a", name: nameA },
+      },
+      {
+        id: "vhost:a:beta",
+        kind: "vhost",
+        label: nameB,
+        data: { hostId: "host:a", name: nameB },
+      },
+      {
+        id: "queue:a:alpha:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:a", vhostId: "vhost:a:alpha", name: "q" },
+      },
+      {
+        id: "queue:a:beta:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:a", vhostId: "vhost:a:beta", name: "q" },
+      },
+    ];
+    const byId = new Map(
+      toReactFlowElements({ nodes, edges: [], diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    const qa = byId.get("queue:a:alpha:q")!;
+    const qb = byId.get("queue:a:beta:q")!;
+    // Both must fit in the 24-char budget.
+    expect(qa.data.vhostBadge!.length).toBeLessThanOrEqual(24);
+    expect(qb.data.vhostBadge!.length).toBeLessThanOrEqual(24);
+    // And they must NOT be equal — the reviewer's specific regression pin.
+    expect(qa.data.vhostBadge).not.toBe(qb.data.vhostBadge);
+    // Each carries the stable hash-suffix form so identity is retained.
+    expect(qa.data.vhostBadge).toMatch(/…[0-9a-f]{4}$/);
+    expect(qb.data.vhostBadge).toMatch(/…[0-9a-f]{4}$/);
+    // Tooltips carry the full unabbreviated names — the truncation is a
+    // display concern only.
+    expect(qa.data.vhostTooltip).toBe(`vhost ${nameA} on host rabbit-a`);
+    expect(qb.data.vhostTooltip).toBe(`vhost ${nameB} on host rabbit-a`);
+  });
+
+  it("produces distinct truncated badges for host-prefixed contexts that share prefix AND tail (ambiguous vhost on two hosts with common surrounding text)", () => {
+    // Same vhost name on two distinct hosts whose LONG names share both
+    // prefix ("rabbit-cluster-region-eu-") and suffix ("-primary"), plus a
+    // shared vhost name — the badge would be `<hostDisc>/<vhostName>` and
+    // both would collapse to the same truncation without a stable identifier.
+    const hostAName = "rabbit-cluster-region-eu-alpha-primary";
+    const hostBName = "rabbit-cluster-region-eu-beta-primary";
+    const sharedVhost = "long-service-vhost-name";
+    const nodes: GraphNode[] = [
+      { id: "host:a", kind: "host", label: hostAName, data: { name: hostAName } },
+      { id: "host:b", kind: "host", label: hostBName, data: { name: hostBName } },
+      {
+        id: "vhost:a:svc",
+        kind: "vhost",
+        label: sharedVhost,
+        data: { hostId: "host:a", name: sharedVhost },
+      },
+      {
+        id: "vhost:b:svc",
+        kind: "vhost",
+        label: sharedVhost,
+        data: { hostId: "host:b", name: sharedVhost },
+      },
+      {
+        id: "queue:a:svc:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:a", vhostId: "vhost:a:svc", name: "q" },
+      },
+      {
+        id: "queue:b:svc:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:b", vhostId: "vhost:b:svc", name: "q" },
+      },
+    ];
+    const byId = new Map(
+      toReactFlowElements({ nodes, edges: [], diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    const qa = byId.get("queue:a:svc:q")!;
+    const qb = byId.get("queue:b:svc:q")!;
+    // Ambiguous vhost on both sides.
+    expect(qa.data.vhostContext?.ambiguous).toBe(true);
+    expect(qb.data.vhostContext?.ambiguous).toBe(true);
+    // Budget respected on both.
+    expect(qa.data.vhostBadge!.length).toBeLessThanOrEqual(24);
+    expect(qb.data.vhostBadge!.length).toBeLessThanOrEqual(24);
+    // Distinct badges — the truncation MUST NOT collapse them into a single
+    // "rabbit-cluster-region-e…" string.
+    expect(qa.data.vhostBadge).not.toBe(qb.data.vhostBadge);
+    // Tooltip surface is unabbreviated and appends the hostId in parens for
+    // the ambiguous-host-name path, ensuring the full-context announcement
+    // stays disambiguated for assistive tech.
+    expect(qa.data.vhostTooltip).toContain(hostAName);
+    expect(qb.data.vhostTooltip).toContain(hostBName);
+  });
+
+  it("guarantees unique truncated badges across a large batch of distinct disambiguators (collision-safe at topology scale, not just the 16-bit birthday bound)", () => {
+    // Regression pin for the reviewer's rejection: `shortStableHash(..., 4)`
+    // alone is 16-bit — the birthday bound is ~256 identities, so a topology
+    // with thousands of vhosts under a shared long prefix WILL collide with
+    // near-certainty under a naive per-context truncation. The batch pipeline
+    // MUST detect this and step the hash length up until every distinct
+    // disambiguator receives a distinct badge. 3000 items comfortably exceeds
+    // the 16-bit collision threshold and stays well under the 32-bit one.
+    const N = 3000;
+    // Long shared prefix so every generated name overflows the 24-char budget
+    // and forces truncation with the hash-suffixed strategy.
+    const prefix = "org-service-orderprocessing-pipeline-";
+    const nodes: GraphNode[] = [
+      { id: "host:a", kind: "host", label: "rabbit-a", data: { name: "rabbit-a" } },
+    ];
+    for (let i = 0; i < N; i += 1) {
+      const name = `${prefix}${i}`;
+      const vhostId = `vhost:a:${i}`;
+      nodes.push({
+        id: vhostId,
+        kind: "vhost",
+        label: name,
+        data: { hostId: "host:a", name },
+      });
+      nodes.push({
+        id: `queue:a:${i}`,
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:a", vhostId, name: "q" },
+      });
+    }
+    const { nodes: flow } = toReactFlowElements({ nodes, edges: [], diagnostics: [] });
+    const queueBadges = flow
+      .filter((n) => n.id.startsWith("queue:a:"))
+      .map((n) => n.data.vhostBadge);
+    // Every queue must have a badge, every badge must fit the budget, and —
+    // the whole point — every badge must be unique across the N distinct
+    // vhostIds. A 16-bit-only implementation cannot satisfy this line.
+    expect(queueBadges).toHaveLength(N);
+    for (const b of queueBadges) {
+      expect(b).toBeDefined();
+      expect(b!.length).toBeLessThanOrEqual(24);
+    }
+    expect(new Set(queueBadges).size).toBe(N);
+  });
+
+  it("keeps the compact 4-hex hash suffix for small graphs where no collision is possible (stability contract for React reconciliation and screenshot tests)", () => {
+    // Small graph, distinct disambiguators. The adaptive-length algorithm
+    // should stay at the minimum 4-hex hash and NOT preemptively bloat the
+    // suffix — that would churn every existing snapshot / a11y test.
+    const nameA = "org-service-orderprocessing-pipeline-alpha-v1";
+    const nameB = "org-service-orderprocessing-pipeline-beta-v1";
+    const nodes: GraphNode[] = [
+      { id: "host:a", kind: "host", label: "rabbit-a", data: { name: "rabbit-a" } },
+      {
+        id: "vhost:a:alpha",
+        kind: "vhost",
+        label: nameA,
+        data: { hostId: "host:a", name: nameA },
+      },
+      {
+        id: "vhost:a:beta",
+        kind: "vhost",
+        label: nameB,
+        data: { hostId: "host:a", name: nameB },
+      },
+      {
+        id: "queue:a:alpha:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:a", vhostId: "vhost:a:alpha", name: "q" },
+      },
+      {
+        id: "queue:a:beta:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:a", vhostId: "vhost:a:beta", name: "q" },
+      },
+    ];
+    const byId = new Map(
+      toReactFlowElements({ nodes, edges: [], diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    expect(byId.get("queue:a:alpha:q")!.data.vhostBadge).toMatch(/…[0-9a-f]{4}$/);
+    expect(byId.get("queue:a:beta:q")!.data.vhostBadge).toMatch(/…[0-9a-f]{4}$/);
+  });
+
+  it("stable hash suffix in the truncated badge is deterministic across renders (same input → same output, so React reconciliation doesn't churn)", () => {
+    const longName = "org-service-".repeat(4) + "unique";
+    const build = () => {
+      const nodes: GraphNode[] = [
+        { id: "host:a", kind: "host", label: "rabbit-a", data: { name: "rabbit-a" } },
+        {
+          id: `vhost:a:${longName}`,
+          kind: "vhost",
+          label: longName,
+          data: { hostId: "host:a", name: longName },
+        },
+        {
+          id: "queue:a:q",
+          kind: "queue",
+          label: "q",
+          data: { hostId: "host:a", vhostId: `vhost:a:${longName}`, name: "q" },
+        },
+      ];
+      return toReactFlowElements({ nodes, edges: [], diagnostics: [] }).nodes;
+    };
+    const first = build().find((n) => n.id === "queue:a:q")!;
+    const second = build().find((n) => n.id === "queue:a:q")!;
+    expect(first.data.vhostBadge).toBe(second.data.vhostBadge);
+    expect(first.data.vhostBadge).toMatch(/…[0-9a-f]{4}$/);
+  });
+
+  it("renders an 'unknown vhost' fallback for external endpoint nodes with no resolvable vhost", () => {
+    const nodes: GraphNode[] = [
+      {
+        id: "external:remote//x:target",
+        kind: "external",
+        label: "exchange target @ remote",
+        data: { host: "remote", exchange: "target" } satisfies EndpointRef,
+      },
+      {
+        id: "external:remote/orders/x:t",
+        kind: "external",
+        label: "exchange t @ remote/orders",
+        data: { host: "remote", vhost: "orders", exchange: "t" } satisfies EndpointRef,
+      },
+    ];
+    const byId = new Map(
+      toReactFlowElements({ nodes, edges: [], diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    const unresolved = byId.get("external:remote//x:target")!;
+    expect(unresolved.data.vhostContext?.unknown).toBe(true);
+    expect(unresolved.data.vhostBadge).toBe("unknown vhost");
+    expect(unresolved.data.vhostTooltip).toBe("unknown vhost");
+
+    const known = byId.get("external:remote/orders/x:t")!;
+    expect(known.data.vhostContext?.unknown).toBe(false);
+    expect(known.data.vhostBadge).toBe("orders");
+    expect(known.data.vhostTooltip).toBe("vhost orders");
+  });
+
+  it("surfaces vhostId as unknown when the entity's vhostId does not match any loaded vhost node", () => {
+    const nodes: GraphNode[] = [
+      { id: "host:a", kind: "host", label: "rabbit-a", data: { name: "rabbit-a" } },
+      {
+        id: "queue:a:orphan",
+        kind: "queue",
+        label: "orphan",
+        data: {
+          id: "queue:a:orphan",
+          hostId: "host:a",
+          vhostId: "vhost:a:missing",
+          name: "orphan",
+        },
+      },
+    ];
+    const byId = new Map(
+      toReactFlowElements({ nodes, edges: [], diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    const q = byId.get("queue:a:orphan")!;
+    // Missing-vhost context now also carries the entity's `hostId` (and the
+    // resolved `hostName`/`hostDiscriminator` when the host node is loaded)
+    // so downstream code can still disambiguate the same orphaned name across
+    // multiple hosts.
+    expect(q.data.vhostContext).toEqual({
+      vhostId: "vhost:a:missing",
+      hostId: "host:a",
+      hostName: "rabbit-a",
+      hostDiscriminator: "rabbit-a",
+      isDefault: false,
+      ambiguous: false,
+      unknown: true,
+    });
+    // Even when the vhost name is unresolved, the badge prefixes with the
+    // host discriminator so two orphans on two different hosts render with
+    // distinct badges (this test only has one host, but the prefix is the
+    // same code path).
+    expect(q.data.vhostBadge).toBe("rabbit-a/unknown vhost");
+    expect(q.data.vhostTooltip).toBe("unknown vhost on host rabbit-a");
+    expect(q.data.label).toBe("orphan · rabbit-a/unknown vhost");
+  });
+
+  it("uses hostId as the badge discriminator when two hosts share the same name (so ambiguous vhosts stay unambiguous)", () => {
+    // Two distinct hosts (`host:a` / `host:b`) but both labelled `"rabbit"`.
+    // A vhost named `orders` exists on both hosts. Naively prefixing with
+    // `hostName` would collapse both badges to `"rabbit/orders"`. The
+    // discriminator falls back to the canonical `hostId` in that case.
+    const nodes: GraphNode[] = [
+      { id: "host:a", kind: "host", label: "rabbit-a", data: { name: "rabbit" } },
+      { id: "host:b", kind: "host", label: "rabbit-b", data: { name: "rabbit" } },
+      {
+        id: "vhost:a:orders",
+        kind: "vhost",
+        label: "orders",
+        data: { hostId: "host:a", name: "orders" },
+      },
+      {
+        id: "vhost:b:orders",
+        kind: "vhost",
+        label: "orders",
+        data: { hostId: "host:b", name: "orders" },
+      },
+      {
+        id: "queue:a:orders:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:a", vhostId: "vhost:a:orders", name: "q" },
+      },
+      {
+        id: "queue:b:orders:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:b", vhostId: "vhost:b:orders", name: "q" },
+      },
+    ];
+    const byId = new Map(
+      toReactFlowElements({ nodes, edges: [], diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    const qa = byId.get("queue:a:orders:q")!;
+    const qb = byId.get("queue:b:orders:q")!;
+    // Badges MUST differ so duplicate entity names stay unambiguous.
+    expect(qa.data.vhostBadge).not.toBe(qb.data.vhostBadge);
+    expect(qa.data.vhostBadge).toBe("host:a/orders");
+    expect(qb.data.vhostBadge).toBe("host:b/orders");
+    // Context records both the human name and the hostId that was ultimately
+    // chosen as the discriminator, so downstream tooling can build a
+    // "rabbit (host:a) vs rabbit (host:b)" affordance without re-deriving it.
+    expect(qa.data.vhostContext?.hostName).toBe("rabbit");
+    expect(qa.data.vhostContext?.hostDiscriminator).toBe("host:a");
+    expect(qb.data.vhostContext?.hostDiscriminator).toBe("host:b");
+    // The tooltip spells out both to keep the assistive-tech surface
+    // unambiguous, appending the hostId in parentheses when the host name
+    // itself is duplicated.
+    expect(qa.data.vhostTooltip).toBe("vhost orders on host rabbit (host:a)");
+    expect(qb.data.vhostTooltip).toBe("vhost orders on host rabbit (host:b)");
+  });
+
+  it("falls back to hostId in both badge and tooltip when the host node is missing (no name metadata resolvable)", () => {
+    // No host node loaded for `host:orphan`, but the queue references it via
+    // `data.hostId`. The badge must still disambiguate the entity from any
+    // other unresolved-host entity elsewhere in the graph.
+    const nodes: GraphNode[] = [
+      // A properly-loaded second host so `ambiguous` machinery is exercised.
+      { id: "host:a", kind: "host", label: "rabbit-a", data: { name: "rabbit-a" } },
+      {
+        id: "vhost:a:orders",
+        kind: "vhost",
+        label: "orders",
+        data: { hostId: "host:a", name: "orders" },
+      },
+      {
+        id: "vhost:orphan:orders",
+        kind: "vhost",
+        label: "orders",
+        data: { hostId: "host:orphan", name: "orders" },
+      },
+      {
+        id: "queue:a:orders:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:a", vhostId: "vhost:a:orders", name: "q" },
+      },
+      {
+        id: "queue:orphan:orders:q",
+        kind: "queue",
+        label: "q",
+        data: { hostId: "host:orphan", vhostId: "vhost:orphan:orders", name: "q" },
+      },
+    ];
+    const byId = new Map(
+      toReactFlowElements({ nodes, edges: [], diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    const known = byId.get("queue:a:orders:q")!;
+    const orphan = byId.get("queue:orphan:orders:q")!;
+    // Both are `ambiguous` (vhost `orders` appears on two host IDs). The
+    // orphan branch has no `hostName` — the discriminator falls back to the
+    // canonical `hostId`.
+    expect(known.data.vhostContext?.ambiguous).toBe(true);
+    expect(orphan.data.vhostContext?.ambiguous).toBe(true);
+    expect(orphan.data.vhostContext?.hostName).toBeUndefined();
+    expect(orphan.data.vhostContext?.hostDiscriminator).toBe("host:orphan");
+    expect(orphan.data.vhostBadge).toBe("host:orphan/orders");
+    // Tooltip falls back to `on host <hostId>` when there is no hostName.
+    expect(orphan.data.vhostTooltip).toBe("vhost orders on host host:orphan");
+    // Sanity: the loaded host still renders with its human name in the badge.
+    expect(known.data.vhostBadge).toBe("rabbit-a/orders");
+  });
+
+  it("emits `unknown vhost` fallback for a queue/exchange/shovel/federation node with no `vhostId` and disambiguates by hostId when the host is known", () => {
+    const nodes: GraphNode[] = [
+      { id: "host:a", kind: "host", label: "rabbit-a", data: { name: "rabbit-a" } },
+      // Queue with hostId but NO vhostId
+      {
+        id: "queue:a:missing-vhost",
+        kind: "queue",
+        label: "q1",
+        data: { hostId: "host:a", name: "q1" },
+      },
+      // Exchange on a different host, also missing vhostId — badges must
+      // differ so the duplicate name doesn't collapse to the same string.
+      {
+        id: "exchange:b:missing-vhost",
+        kind: "exchange",
+        label: "q1",
+        data: { hostId: "host:b", name: "q1", type: "topic" },
+      },
+      // Shovel with no host or vhost data at all — pure fallback path.
+      {
+        id: "shovel:orphan",
+        kind: "shovel",
+        label: "s1",
+        data: { name: "s1", source: {}, destination: {} },
+      },
+      // Federation missing vhostId but with hostId.
+      {
+        id: "federation:a:missing-vhost",
+        kind: "federation",
+        label: "f1",
+        data: { hostId: "host:a", name: "f1", upstream: {}, downstream: {} },
+      },
+    ];
+    const byId = new Map(
+      toReactFlowElements({ nodes, edges: [], diagnostics: [] }).nodes.map((n) => [n.id, n]),
+    );
+    const q = byId.get("queue:a:missing-vhost")!;
+    expect(q.data.vhostContext).toEqual({
+      hostId: "host:a",
+      hostName: "rabbit-a",
+      hostDiscriminator: "rabbit-a",
+      isDefault: false,
+      ambiguous: false,
+      unknown: true,
+    });
+    expect(q.data.vhostBadge).toBe("rabbit-a/unknown vhost");
+    expect(q.data.vhostTooltip).toBe("unknown vhost on host rabbit-a");
+    expect(q.data.label).toBe("q1 · rabbit-a/unknown vhost");
+
+    // Exchange on the un-loaded host `host:b` — hostName is undefined so the
+    // hostId anchors the badge and tooltip.
+    const x = byId.get("exchange:b:missing-vhost")!;
+    expect(x.data.vhostContext?.hostName).toBeUndefined();
+    expect(x.data.vhostContext?.hostDiscriminator).toBe("host:b");
+    expect(x.data.vhostBadge).toBe("host:b/unknown vhost");
+    expect(x.data.vhostTooltip).toBe("unknown vhost on host host:b");
+    // Duplicate queue/exchange name `q1` on two hosts now renders with two
+    // distinct badges — the regression contract.
+    expect(q.data.vhostBadge).not.toBe(x.data.vhostBadge);
+
+    // Shovel with no host data whatsoever — the badge is the bare fallback,
+    // matching the "no metadata to disambiguate" case.
+    const s = byId.get("shovel:orphan")!;
+    expect(s.data.vhostContext?.hostDiscriminator).toBeUndefined();
+    expect(s.data.vhostBadge).toBe("unknown vhost");
+    expect(s.data.vhostTooltip).toBe("unknown vhost");
+
+    // Federation without vhostId gets the same treatment as the queue.
+    const f = byId.get("federation:a:missing-vhost")!;
+    expect(f.data.vhostBadge).toBe("rabbit-a/unknown vhost");
+  });
+
+  it("resolves badges from complete context nodes when the rendered graph omits host and vhost containers", () => {
+    const full = baseGraph();
+    const renderedNodes = full.nodes.filter(
+      (node) => node.id === "queue:a:q1" || node.id === "exchange:a:x1",
+    );
+    const result = toReactFlowElements(
+      { nodes: renderedNodes, edges: [], diagnostics: [] },
+      { contextNodes: full.nodes },
+    );
+    const byId = new Map(result.nodes.map((node) => [node.id, node]));
+
+    // Structural containers remain excluded from the render graph.
+    expect(byId.has("host:a")).toBe(false);
+    expect(byId.has("vhost:a:/")).toBe(false);
+    expect(byId.has("vhost:a:orders")).toBe(false);
+
+    // Still-visible entities retain canonical context from the complete graph.
+    expect(byId.get("queue:a:q1")!.data.vhostBadge).toBe("orders");
+    expect(byId.get("queue:a:q1")!.data.vhostTooltip).toBe(
+      "vhost orders on host rabbit-a",
+    );
+    expect(byId.get("exchange:a:x1")!.data.vhostBadge).toBe("/");
+    expect(byId.get("exchange:a:x1")!.data.vhostContext?.unknown).toBe(false);
+  });
+
+  it("preserves highlight styling on nodes that carry a vhost badge", () => {
+    const g = baseGraph();
+    const result = toReactFlowElements(
+      { ...g, diagnostics: [] },
+      {
+        highlight: {
+          targetNodeId: "queue:a:q1",
+          nodeIds: new Set(["queue:a:q1", "exchange:a:x1"]),
+          edgeIds: new Set(),
+        },
+      },
+    );
+    const byId = new Map(result.nodes.map((n) => [n.id, n]));
+    const q = byId.get("queue:a:q1")!;
+    // Selection target styling AND the vhost context both survive.
+    expect(q.data.highlightState).toBe("target");
+    expect(String(q.style!.boxShadow)).toContain("3px");
+    expect(q.data.vhostBadge).toBe("orders");
+    // Off-path node keeps its badge too so identity remains readable while dimmed.
+    const shovel = byId.get("shovel:a:s1")!;
+    expect(shovel.data.highlightState).toBe("off-path");
+    expect(shovel.data.vhostBadge).toBe("orders");
   });
 });

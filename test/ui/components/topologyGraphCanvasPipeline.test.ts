@@ -305,6 +305,101 @@ describe("TopologyGraphCanvas pipeline — focused mode composes with filters + 
     }
   });
 
+  it("regression: hiding host/vhost containers via visibility does NOT degrade the surviving queue's badge (contextNodes carries canonical vhost data through)", () => {
+    // Mirrors the canvas wiring: rawGraph → filter → visibility → focus →
+    // render, with `contextNodes` fed from the pre-filter rawGraph so a
+    // still-visible entity keeps its resolved vhost/host names even when the
+    // structural containers are hidden by visibility state.
+    const raw = pipelineFixture();
+    const filtered = applyGraphFilters(raw);
+    // Explicitly hide the host + vhost containers for host:a — the queue
+    // remains visible. The visibility panel UI doesn't expose host/vhost
+    // toggles, but the underlying `hideNodes(state, ids)` reducer accepts
+    // any node ids, and isolation/programmatic tools can produce this state.
+    const visibility = hideNodes(createEmptyVisibility(), [
+      "host:a",
+      "vhost:a:/",
+    ]);
+    const { renderInput } = composeFocusedTopology({
+      graph: filtered,
+      visibility,
+    });
+    // Sanity: the render input has dropped the containers but kept the queue.
+    const renderIds = new Set(renderInput.nodes.map((n) => n.id));
+    expect(renderIds.has("host:a")).toBe(false);
+    expect(renderIds.has("vhost:a:/")).toBe(false);
+    expect(renderIds.has("queue:a:q1")).toBe(true);
+
+    // BAD path (regression pin): if the badge resolver runs on the reduced
+    // render input, the queue would degrade to `unknown vhost` — the vhost
+    // node it references is no longer in scope.
+    const withoutContext = toReactFlowElements(renderInput, {
+      includeContains: false,
+    });
+    const queueWithoutContext = withoutContext.nodes.find(
+      (n) => n.id === "queue:a:q1",
+    )!;
+    expect(queueWithoutContext.data.vhostContext?.unknown).toBe(true);
+    expect(queueWithoutContext.data.vhostBadge).toContain("unknown vhost");
+
+    // GOOD path (canvas wiring): the resolver runs on the pre-filter
+    // `rawGraph.nodes` via `contextNodes`, so the same visible entity keeps
+    // its resolved vhost/host names.
+    const withContext = toReactFlowElements(renderInput, {
+      includeContains: false,
+      contextNodes: raw.nodes,
+    });
+    const queueWithContext = withContext.nodes.find(
+      (n) => n.id === "queue:a:q1",
+    )!;
+    expect(queueWithContext.data.vhostContext?.unknown).toBe(false);
+    expect(queueWithContext.data.vhostContext?.vhostName).toBe("/");
+    // The pipeline fixture has vhost `/` on BOTH hosts, so the vhost name
+    // is ambiguous and the badge is host-prefixed for disambiguation.
+    expect(queueWithContext.data.vhostContext?.ambiguous).toBe(true);
+    expect(queueWithContext.data.vhostBadge).toBe("a//");
+    expect(queueWithContext.data.vhostTooltip).toBe("vhost / on host a");
+    // No excluded container id sneaks back into the render.
+    const withContextIds = new Set(withContext.nodes.map((n) => n.id));
+    expect(withContextIds.has("host:a")).toBe(false);
+    expect(withContextIds.has("vhost:a:/")).toBe(false);
+  });
+
+  it("regression: filtering to a single entity kind (queues only) preserves badges via contextNodes even though every host/vhost/exchange is dropped", () => {
+    // Emulates the canvas's filter-by-entity-kind path: allow-list = {queue}
+    // drops host/vhost/exchange from the render, but the resolver still gets
+    // the pre-filter `rawGraph.nodes` via `contextNodes` so the surviving
+    // queues keep their vhost badges.
+    const raw = pipelineFixture();
+    const filtered = applyGraphFilters(raw, { entityKinds: new Set(["queue"]) });
+    const { renderInput } = composeFocusedTopology({
+      graph: filtered,
+      visibility: createEmptyVisibility(),
+    });
+    const renderIds = new Set(renderInput.nodes.map((n) => n.id));
+    // Host/vhost/exchange dropped.
+    expect(renderIds.has("host:a")).toBe(false);
+    expect(renderIds.has("vhost:a:/")).toBe(false);
+    expect(renderIds.has("exchange:a:x1")).toBe(false);
+    expect(renderIds.has("queue:a:q1")).toBe(true);
+    expect(renderIds.has("queue:b:q2")).toBe(true);
+
+    const flow = toReactFlowElements(renderInput, {
+      includeContains: false,
+      contextNodes: raw.nodes,
+    });
+    const q1 = flow.nodes.find((n) => n.id === "queue:a:q1")!;
+    const q2 = flow.nodes.find((n) => n.id === "queue:b:q2")!;
+    expect(q1.data.vhostContext?.vhostName).toBe("/");
+    expect(q1.data.vhostContext?.hostName).toBe("a");
+    expect(q2.data.vhostContext?.hostName).toBe("b");
+    // Both vhosts named `/` — the badge disambiguates by host discriminator.
+    expect(q1.data.vhostContext?.ambiguous).toBe(true);
+    expect(q1.data.vhostBadge).toBe("a//");
+    expect(q2.data.vhostBadge).toBe("b//");
+    expect(q1.data.vhostBadge).not.toBe(q2.data.vhostBadge);
+  });
+
   it("regression: composeFocusedTopology.renderInput === focused when focusNodeId is set, so any wiring that bypasses the clip fails a shared-function assertion", () => {
     const filtered = applyGraphFilters(pipelineFixture());
     const composition = composeFocusedTopology({

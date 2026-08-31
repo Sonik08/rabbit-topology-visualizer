@@ -28,12 +28,18 @@ const rfState = {
 };
 vi.mock("reactflow", () => {
   const React = require("react");
+  interface RFNode {
+    id: string;
+    type?: string;
+    data?: unknown;
+  }
   interface RFProps {
     onNodeClick?: (event: unknown, node: { id: string }) => void;
     onPaneClick?: () => void;
     onInit?: (instance: { fitView: (opts?: unknown) => void }) => void;
-    nodes?: Array<{ id: string }>;
+    nodes?: RFNode[];
     edges?: Array<{ id: string }>;
+    nodeTypes?: Record<string, React.ComponentType<{ data: unknown }>>;
   }
   const Rf = (props: RFProps) => {
     // Record for exact-count assertions in the tests. Each render replaces
@@ -58,6 +64,23 @@ vi.mock("reactflow", () => {
       props.nodes?.find((n) => n.id.startsWith("queue:"))?.id ??
       props.nodes?.[0]?.id ??
       "queue:h:q";
+    // Render each node via its registered `nodeType` component (defaulting to
+    // a bare label span when no type is registered) so tests can assert on
+    // real DOM output — specifically the `title`/`aria-label` accessibility
+    // attributes that the topology entity node adds for the vhost tooltip.
+    const nodeElements = (props.nodes ?? []).map((node) => {
+      const Component = node.type ? props.nodeTypes?.[node.type] : undefined;
+      const key = node.id;
+      const attrs = { "data-testid": `rf-mock-node-${node.id}`, key };
+      if (Component) {
+        return React.createElement(
+          "div",
+          attrs,
+          React.createElement(Component, { data: node.data }),
+        );
+      }
+      return React.createElement("div", attrs, String(node.id));
+    });
     return React.createElement(
       "div",
       {
@@ -83,6 +106,7 @@ vi.mock("reactflow", () => {
         },
         "click pane",
       ),
+      ...nodeElements,
     );
   };
   return {
@@ -91,6 +115,8 @@ vi.mock("reactflow", () => {
     Background: () => null,
     Controls: () => null,
     MiniMap: () => null,
+    Handle: () => null,
+    Position: { Top: "top", Bottom: "bottom", Left: "left", Right: "right" },
   };
 });
 
@@ -461,5 +487,158 @@ describe("TopologyGraphCanvas — uncontrolled selection fallback", () => {
     await waitFor(() => {
       expect(screen.queryByTestId("topology-graph-selection-summary")).toBeNull();
     });
+  });
+});
+
+describe("TopologyGraphCanvas — vhost badge accessibility & pipeline composition", () => {
+  it("composes entity identity + resolved vhost context in the accessible name (aria-label MUST retain the entity label; tooltip stays as `title`)", async () => {
+    const client = mockClient();
+    render(
+      <TopologyGraphCanvas result={emptyImportResult()} workerClient={client} />,
+    );
+    // Wait until the ReactFlow mock has been fed the built graph so the
+    // topology entity nodes actually reach the DOM through `nodeTypes`.
+    await waitFor(() => {
+      expect(screen.getByTestId("rf-mock-node-queue:h:q")).toBeTruthy();
+    });
+    const queueNode = screen.getByTestId("rf-mock-node-queue:h:q");
+    const inner = queueNode.querySelector<HTMLElement>(
+      '[data-testid="topology-graph-node"]',
+    );
+    expect(inner).not.toBeNull();
+    // Fixture: queue:h:q is on vhost "/" of host "h".
+    // `title` = tooltip alone (hover popover surface).
+    expect(inner!.getAttribute("title")).toBe("vhost / on host h");
+    // `aria-label` MUST retain entity identity (the visible label) — a screen
+    // reader that reads only the vhost tooltip loses the queue/exchange name.
+    // The composed form is `<visible label>, <tooltip>`.
+    const ariaLabel = inner!.getAttribute("aria-label")!;
+    expect(ariaLabel).toContain("q · /"); // entity label (with vhost badge suffix)
+    expect(ariaLabel).toContain("vhost / on host h"); // full disambiguating context
+    expect(ariaLabel).toBe("q · /, vhost / on host h");
+    // The compact visible label carries the badge suffix so operators can spot
+    // the vhost without hovering.
+    expect(inner!.textContent).toContain("· /");
+
+    // The exchange node — same accessibility contract — retains its identity
+    // (including the `[topic]` subtype badge) AND appends the vhost context.
+    const exchangeNode = screen.getByTestId("rf-mock-node-exchange:h:x");
+    const exchangeInner = exchangeNode.querySelector<HTMLElement>(
+      '[data-testid="topology-graph-node"]',
+    );
+    expect(exchangeInner!.getAttribute("title")).toBe("vhost / on host h");
+    const exchangeAria = exchangeInner!.getAttribute("aria-label")!;
+    expect(exchangeAria).toContain("[topic]");
+    expect(exchangeAria).toContain("x");
+    expect(exchangeAria).toContain("vhost / on host h");
+    expect(exchangeAria).toBe("[topic] x · /, vhost / on host h");
+
+    // Host/vhost nodes have no vhost context → tooltip absent and `aria-label`
+    // is left off so the a11y tree falls back to the visible text (the entity
+    // label itself). This keeps host/vhost identifiable without fabricating
+    // tooltip text.
+    const hostNode = screen.getByTestId("rf-mock-node-host:h");
+    const hostInner = hostNode.querySelector<HTMLElement>(
+      '[data-testid="topology-graph-node"]',
+    );
+    expect(hostInner!.getAttribute("title")).toBeNull();
+    expect(hostInner!.getAttribute("aria-label")).toBeNull();
+    expect(hostInner!.textContent).toContain("h");
+  });
+
+  it("keeps canonical vhost context when filtering hides host/vhost containers but leaves queues visible", async () => {
+    const client = mockClient();
+    render(
+      <TopologyGraphCanvas result={emptyImportResult()} workerClient={client} />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("rf-mock-node-queue:h:q")).toBeTruthy();
+    });
+
+    // A non-empty entity-kind set is an allow-list. Selecting only `queue`
+    // removes the host and vhost structural nodes while retaining queues.
+    fireEvent.click(screen.getByTestId("topology-filters-entity-queue"));
+    await waitFor(() => {
+      expect(screen.queryByTestId("rf-mock-node-host:h")).toBeNull();
+      expect(screen.queryByTestId("rf-mock-node-vhost:h:/")).toBeNull();
+      expect(screen.getByTestId("rf-mock-node-queue:h:q")).toBeTruthy();
+    });
+
+    // Badge resolution must still use the complete canonical graph supplied
+    // by the canvas, not degrade to `unknown vhost` from the filtered graph.
+    const queueNode = screen.getByTestId("rf-mock-node-queue:h:q");
+    const inner = queueNode.querySelector<HTMLElement>(
+      '[data-testid="topology-graph-node"]',
+    );
+    expect(inner!.getAttribute("title")).toBe("vhost / on host h");
+    expect(inner!.getAttribute("aria-label")).toBe("q · /, vhost / on host h");
+    expect(inner!.textContent).toContain("· /");
+    expect(inner!.textContent).not.toContain("unknown vhost");
+  });
+
+  it("composes with the visibility panel: hiding a specific queue removes that node while the surviving exchange keeps its vhost badge/tooltip intact", async () => {
+    const client = mockClient();
+    render(
+      <TopologyGraphCanvas result={emptyImportResult()} workerClient={client} />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("rf-mock-node-queue:h:q")).toBeTruthy();
+    });
+    // Hide `queue:h:q` via the visibility panel's per-entity toggle. The
+    // toggle is a checkbox — clicking it flips the node into the hidden set.
+    const toggle = screen.getByTestId("topology-visibility-toggle-queue:h:q");
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(screen.queryByTestId("rf-mock-node-queue:h:q")).toBeNull();
+    });
+    // The unrelated exchange still renders WITH the vhost tooltip — proving
+    // the badge/tooltip surface didn't get lost when the pipeline dropped a
+    // sibling node.
+    const exchangeNode = screen.getByTestId("rf-mock-node-exchange:h:x");
+    const inner = exchangeNode.querySelector<HTMLElement>(
+      '[data-testid="topology-graph-node"]',
+    );
+    expect(inner!.getAttribute("title")).toBe("vhost / on host h");
+    // Accessible name retains the entity identity (`[topic] x · /`) alongside
+    // the tooltip so screen readers still hear which entity this is.
+    expect(inner!.getAttribute("aria-label")).toBe("[topic] x · /, vhost / on host h");
+  });
+
+  it("composes with the visibility panel's ISOLATE-neighborhood action: entities outside the neighborhood are removed while the isolated entity keeps its full canonical badge/tooltip", async () => {
+    const client = mockClient();
+    render(
+      <TopologyGraphCanvas result={emptyImportResult()} workerClient={client} />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("rf-mock-node-queue:h:q")).toBeTruthy();
+    });
+    // The isolate action requires a selection — click a queue via the mock
+    // click-node button so the canvas selects `queue:h:q` (uncontrolled).
+    fireEvent.click(screen.getByTestId("rf-mock-click-node"));
+    await waitFor(() => {
+      expect(screen.getByTestId("topology-graph-selection-summary")).toBeTruthy();
+    });
+    // Now trigger `isolateNeighborhood` for the selected queue.
+    fireEvent.click(screen.getByTestId("topology-visibility-isolate-selected"));
+    await waitFor(() => {
+      // The unrelated queue+exchange chain must fall outside the neighborhood
+      // of `queue:h:q` and drop from the render.
+      expect(screen.queryByTestId("rf-mock-node-queue:h:unrelated")).toBeNull();
+      expect(screen.queryByTestId("rf-mock-node-exchange:h:unrelated")).toBeNull();
+    });
+    // The isolated queue is still visible and — critically — its accessible
+    // name is UNCHANGED even though the vhost/host containers may have been
+    // pruned by isolation. This proves `contextNodes` (pre-filter/pre-vis) is
+    // consulted by the resolver rather than the post-isolation render graph.
+    const queueNode = screen.getByTestId("rf-mock-node-queue:h:q");
+    const inner = queueNode.querySelector<HTMLElement>(
+      '[data-testid="topology-graph-node"]',
+    );
+    expect(inner!.getAttribute("title")).toBe("vhost / on host h");
+    expect(inner!.getAttribute("aria-label")).toBe("q · /, vhost / on host h");
+    // Visible label still carries the compact badge (never degrades to
+    // `unknown vhost` even if the vhost node was excluded by isolation).
+    expect(inner!.textContent).toContain("· /");
+    expect(inner!.textContent).not.toContain("unknown vhost");
   });
 });

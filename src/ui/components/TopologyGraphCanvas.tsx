@@ -1,14 +1,19 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import ReactFlow, {
   Background,
   Controls,
+  Handle,
   MiniMap,
+  Position,
   type Edge,
   type Node,
   type NodeMouseHandler,
+  type NodeProps,
+  type NodeTypes,
   type ReactFlowInstance,
 } from "reactflow";
 import "reactflow/dist/style.css";
+import type { FlowNodeData } from "./topologyGraphElements";
 import {
   getSharedTopologyWorkerClient,
   type ImportArchiveWorkerClient,
@@ -176,8 +181,12 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
         includeContains: showContains,
         highlight: highlight.nodeIds.size > 0 ? highlight : undefined,
         configuredFlowMotion,
+        // Resolve entity badges from the complete canonical graph, not the
+        // post-filter/post-visibility render graph. Hiding a host or vhost
+        // container must not erase context from a still-visible queue.
+        contextNodes: rawGraph.nodes,
       }),
-    [composition, showContains, highlight, configuredFlowMotion],
+    [composition, showContains, highlight, configuredFlowMotion, rawGraph.nodes],
   );
 
   const onNodeClick = useCallback<NodeMouseHandler>((_, node) => {
@@ -297,6 +306,7 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
         <ReactFlow
           nodes={flowGraph.nodes as unknown as Node[]}
           edges={flowGraph.edges as unknown as Edge[]}
+          nodeTypes={TOPOLOGY_NODE_TYPES}
           fitView
           onInit={handleReactFlowInit}
           proOptions={{ hideAttribution: true }}
@@ -373,4 +383,60 @@ const clearButtonStyle: React.CSSProperties = {
   borderRadius: 4,
   cursor: "pointer",
   fontSize: "0.75rem",
+};
+
+/**
+ * Custom React Flow node that renders the entity label AND surfaces the
+ * resolved vhost context as a real `title`+`aria-label` on the wrapper.
+ * This is the accessibility path for the compact vhost badge: the visible
+ * badge is truncated at 24 chars, but the full unabbreviated tooltip text
+ * (`vhost <name> on host <host>`, or the `unknown vhost` fallback) always
+ * reaches assistive tech and mouse-hover tooltips without an extra popover.
+ */
+const TopologyEntityNode = memo(function TopologyEntityNode({
+  data,
+}: NodeProps<FlowNodeData>): JSX.Element {
+  const tooltip = data.vhostTooltip;
+  // Accessibility contract: the accessible name MUST identify the entity by
+  // its full label (name + subtype badge + compact vhost badge) — never the
+  // vhost context alone. `aria-label` overrides the visible text, so if we
+  // set it to just the tooltip, a screen reader would only hear the vhost
+  // and lose the queue/exchange/shovel/federation identity. Compose both:
+  // "<visible label>, <full vhost context>" so users hear entity identity
+  // FIRST, then the disambiguating full-context announcement. When there is
+  // no tooltip (host/vhost nodes), `aria-label` is omitted so the visible
+  // text remains the accessible name via the default a11y-tree rules.
+  const accessibleName = tooltip ? `${data.label}, ${tooltip}` : undefined;
+  // React Flow's default node ships with `<Handle>` connectors so edges can
+  // attach. We replicate that (source at bottom, target at top) so the graph
+  // continues to render with the same visual affordances after switching to a
+  // custom node type. Only the `topology` node type is used, so both handles
+  // are always safe to expose.
+  return (
+    <div
+      data-testid="topology-graph-node"
+      data-vhost-tooltip={tooltip ?? ""}
+      title={tooltip}
+      aria-label={accessibleName}
+      style={nodeInnerStyle}
+    >
+      <Handle type="target" position={Position.Top} isConnectable={false} />
+      <span>{data.label}</span>
+      <Handle type="source" position={Position.Bottom} isConnectable={false} />
+    </div>
+  );
+});
+
+const nodeInnerStyle: React.CSSProperties = {
+  width: "100%",
+  height: "100%",
+  display: "flex",
+  alignItems: "center",
+  justifyContent: "center",
+  textAlign: "center",
+  lineHeight: 1.2,
+};
+
+const TOPOLOGY_NODE_TYPES: NodeTypes = {
+  topology: TopologyEntityNode,
 };
