@@ -242,9 +242,12 @@ export function summarizeImportedTotals(result: ImportResult): ImportTotals {
 const panelStyle: React.CSSProperties = {
   border: "1px solid #ddd",
   borderRadius: 6,
-  padding: "1rem",
+  padding: "clamp(0.75rem, 2vw, 1rem)",
   fontFamily: "system-ui, sans-serif",
-  maxWidth: 720,
+  // Fluid width — see ImportPanel.tsx `panelStyle` for the shared rationale.
+  width: "100%",
+  maxWidth: "100%",
+  boxSizing: "border-box",
   marginTop: "1rem",
 };
 

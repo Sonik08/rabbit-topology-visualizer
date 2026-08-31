@@ -4,6 +4,26 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Rabbit Topology Visualizer</title>
+    <style>
+      html,
+      body,
+      #root {
+        margin: 0;
+        min-height: 100vh;
+        box-sizing: border-box;
+      }
+      *,
+      *::before,
+      *::after {
+        box-sizing: inherit;
+      }
+      /* No `overflow-x: hidden` here — hiding overflow can silently clip
+         controls that leaked past the viewport, masking real layout bugs
+         instead of exposing them. Panels are made truly fluid instead
+         (see App shell + panelStyle across ui/components/*). Long inline
+         content that must not force overflow uses `min-width: 0` on flex
+         children and `overflow-wrap: anywhere` on text nodes. */
+    </style>
   </head>
   <body>
     <div id="root"></div>

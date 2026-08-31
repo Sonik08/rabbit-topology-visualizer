@@ -280,9 +280,14 @@ export function ImportPanel({ onImported }: ImportPanelProps): JSX.Element {
 const panelStyle: React.CSSProperties = {
   border: "1px solid #ddd",
   borderRadius: 6,
-  padding: "1rem",
+  padding: "clamp(0.75rem, 2vw, 1rem)",
   fontFamily: "system-ui, sans-serif",
-  maxWidth: 640,
+  // Fluid width — panel fills its parent container at every breakpoint. The
+  // App shell owns the outer inset; a fixed `maxWidth` here would clip on
+  // narrow viewports and leave dead space on wide ones.
+  width: "100%",
+  maxWidth: "100%",
+  boxSizing: "border-box",
 };
 
 const dropZoneStyle = (active: boolean): React.CSSProperties => ({

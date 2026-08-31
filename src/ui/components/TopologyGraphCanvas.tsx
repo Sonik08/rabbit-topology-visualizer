@@ -213,6 +213,25 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
     if (!rfInstanceRef.current) return;
     rfInstanceRef.current.fitView({ duration: 0 });
   }, [focused]);
+  // Explicit fit-on-resize wiring. React Flow does not guarantee a fit-view
+  // refresh when its container's box changes size (only when nodes/edges
+  // do) — a browser resize that reflows the fluid graph shell would
+  // otherwise leave the viewport panned/zoomed to the pre-resize size.
+  // Attach a `ResizeObserver` to the graph container and call `fitView` on
+  // every observed size change. `fitView` is idempotent when the graph is
+  // already fit, so we don't need to filter the initial notification —
+  // an extra call at mount is invisible to the user.
+  const graphContainerRef = useRef<HTMLDivElement | null>(null);
+  useEffect(() => {
+    const container = graphContainerRef.current;
+    if (!container) return;
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(() => {
+      rfInstanceRef.current?.fitView({ duration: 0 });
+    });
+    observer.observe(container);
+    return () => observer.disconnect();
+  }, []);
 
   const selectionSummary = useMemo(() => {
     if (!selectedNodeId) return undefined;
@@ -302,7 +321,7 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
           </button>
         </div>
       )}
-      <div style={{ height: heightPx, border: "1px solid #ddd", borderRadius: 6 }}>
+      <div ref={graphContainerRef} style={graphContainerStyle(heightPx)}>
         <ReactFlow
           nodes={flowGraph.nodes as unknown as Node[]}
           edges={flowGraph.edges as unknown as Edge[]}
@@ -333,16 +352,45 @@ export type { FlowNode, FlowEdge };
 const panelStyle: React.CSSProperties = {
   border: "1px solid #ddd",
   borderRadius: 6,
-  padding: "1rem",
+  padding: "clamp(0.75rem, 2vw, 1rem)",
   fontFamily: "system-ui, sans-serif",
-  maxWidth: 1080,
+  // Fluid — the graph shell fills its parent container width at every
+  // breakpoint. React Flow inside a fluid container observes its own size,
+  // so the graph re-fits automatically on viewport resize.
+  width: "100%",
+  maxWidth: "100%",
+  boxSizing: "border-box",
   marginTop: "1rem",
 };
+
+/**
+ * Fluid graph-container height. Uses `min(70vh, heightPx)` — the graph
+ * takes 70 % of the viewport height, capped at the caller's ideal ceiling
+ * (`heightPx`, default 520). No hard pixel floor: on a short mobile
+ * viewport (e.g. 400 px tall) 70 vh resolves to 280 px, well within the
+ * viewport, instead of being pinned to a 320 px minimum that could exceed
+ * the remaining space after headers/panels. The graph itself remains
+ * usable at any size because React Flow scales its rendering with the
+ * container.
+ */
+function graphContainerStyle(heightPx: number): React.CSSProperties {
+  return {
+    height: `min(70vh, ${heightPx}px)`,
+    width: "100%",
+    border: "1px solid #ddd",
+    borderRadius: 6,
+    boxSizing: "border-box",
+  };
+}
 
 const headerRowStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
   alignItems: "center",
+  // Allow controls to wrap onto multiple lines at narrow widths instead of
+  // clipping past the panel edge.
+  flexWrap: "wrap",
+  gap: "0.5rem",
   marginBottom: "0.25rem",
 };
 
@@ -356,6 +404,10 @@ const selectionBarStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
   alignItems: "center",
+  // Wrap on narrow viewports so the "Clear selection" button drops onto its
+  // own line instead of being clipped or forcing horizontal overflow.
+  flexWrap: "wrap",
+  gap: "0.5rem",
   padding: "0.4rem 0.6rem",
   marginBottom: "0.5rem",
   background: "#fffbe6",
@@ -368,6 +420,9 @@ const focusBarStyle: React.CSSProperties = {
   display: "flex",
   justifyContent: "space-between",
   alignItems: "center",
+  // Wrap on narrow viewports — see `selectionBarStyle`.
+  flexWrap: "wrap",
+  gap: "0.5rem",
   padding: "0.4rem 0.6rem",
   marginBottom: "0.5rem",
   background: "#eaf3ff",
