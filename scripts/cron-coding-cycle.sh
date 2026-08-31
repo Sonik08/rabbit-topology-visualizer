@@ -79,9 +79,12 @@ LATEST_CODER_OUTPUT="$STATE_DIR/latest-coder-output.txt"
 PENDING_BLOCKER="$STATE_DIR/pending-blocker.txt"
 DIRTY_AT_START="$(git status --porcelain --untracked-files=normal -- . ':(exclude)data/raw' ':(exclude)reports' || true)"
 if [ -s "$PENDING_BLOCKER" ] && [ -z "$DIRTY_AT_START" ]; then
-  cat "$PENDING_BLOCKER"
-  echo "RABBIT_AUTOMATION_RESULT status=blocked reason=pending-blocker-clean-tree"
-  exit 0
+  # A clean tree has nothing to repair. This commonly follows a transient model,
+  # network, or quota failure before any edits were made. Keeping the marker
+  # would permanently block every future run, so preserve its context in the
+  # immutable per-run reports and retry from task mode.
+  echo "RABBIT_AUTOMATION_RECOVERY status=cleared-stale-blocker blocker=$(tr '\n' ' ' < "$PENDING_BLOCKER")"
+  rm -f "$PENDING_BLOCKER" "$LATEST_REVIEW_TEXT" "$LATEST_VERIFY_OUTPUT" 2>/dev/null || true
 fi
 RUN_MODE="task"
 MODE_RULES="- Complete at least one unchecked task from TASKS.md if possible. Maximum tasks this run: $MAX_TASKS.
