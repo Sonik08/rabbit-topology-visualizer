@@ -12,6 +12,7 @@ afterEach(() => {
   rfState.nodes = [];
   rfState.edges = [];
   rfState.fitViewCalls = 0;
+  rfState.onInitCalls = 0;
 });
 
 // ReactFlow's real rendering path is heavy in jsdom (measures DOM, wires
@@ -25,6 +26,13 @@ const rfState = {
   nodes: [] as Array<{ id: string }>,
   edges: [] as Array<{ id: string }>,
   fitViewCalls: 0,
+  // Count how many times ReactFlow fires `onInit`. A refit that comes from
+  // the ReactFlow subtree unmounting + remounting (which would re-fire
+  // onInit and re-spy fitView) is NOT proof that the canvas's
+  // `[focused, isFullPage]` effect or the ResizeObserver actually ran —
+  // full-page-mode regressions must show fitView incrementing WITHOUT
+  // onInit increasing.
+  onInitCalls: 0,
 };
 vi.mock("reactflow", () => {
   const React = require("react");
@@ -50,6 +58,11 @@ vi.mock("reactflow", () => {
       // Simulate ReactFlow's `onInit` firing once the instance is created.
       // The canvas captures the instance in a ref and calls `fitView()` when
       // focused mode changes — assign a spy so the test can assert the call.
+      // Also tick `onInitCalls` so tests can prove the ReactFlow subtree did
+      // NOT unmount/remount across a state change (which is what would
+      // otherwise silently make a "fitView was called" assertion pass for
+      // the wrong reason).
+      rfState.onInitCalls += 1;
       props.onInit?.({
         fitView: () => {
           rfState.fitViewCalls += 1;
@@ -640,5 +653,274 @@ describe("TopologyGraphCanvas — vhost badge accessibility & pipeline compositi
     // `unknown vhost` even if the vhost node was excluded by isolation).
     expect(inner!.textContent).toContain("· /");
     expect(inner!.textContent).not.toContain("unknown vhost");
+  });
+});
+
+describe("TopologyGraphCanvas — full-page mode", () => {
+  async function mountWithGraph() {
+    const client = mockClient();
+    const view = render(
+      <TopologyGraphCanvas result={emptyImportResult()} workerClient={client} />,
+    );
+    // Wait for the graph build to reach the ReactFlow mock.
+    await waitFor(() => {
+      expect(screen.getByTestId("rf-mock-click-node")).toBeTruthy();
+    });
+    return view;
+  }
+
+  it("renders an accessible toggle button that starts un-pressed and flips `aria-pressed` on activation (enter regression)", async () => {
+    await mountWithGraph();
+    const toggle = screen.getByTestId("topology-graph-fullpage-toggle");
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    // Section is NOT full-page at rest.
+    const section = screen.getByTestId("topology-graph-canvas");
+    expect(section.getAttribute("data-fullpage")).toBe("false");
+    expect(section.style.position).not.toBe("fixed");
+    // Activate.
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    // Section overlays the viewport via position:fixed + inset:0.
+    expect(section.getAttribute("data-fullpage")).toBe("true");
+    expect(section.style.position).toBe("fixed");
+    // jsdom may serialize `inset: 0` as either "0" or "0px" depending on
+    // its CSSOM version; accept both.
+    expect(["0", "0px"]).toContain(section.style.inset);
+    // Overlay establishes a stacking context above the App.
+    expect(Number(section.style.zIndex)).toBeGreaterThanOrEqual(100);
+  });
+
+  it("graph shell grows into remaining space when full-page (flex 1) so the graph itself fills the viewport, not just the section", async () => {
+    await mountWithGraph();
+    const toggle = screen.getByTestId("topology-graph-fullpage-toggle");
+    // Baseline: graph shell uses the fluid `min(70vh, ...)` height.
+    const rfRoot = screen.getByTestId("rf-mock-root");
+    const baselineShell = rfRoot.parentElement!;
+    expect(baselineShell.style.height).toContain("min(");
+    // Enter full-page.
+    fireEvent.click(toggle);
+    const fullShell = rfRoot.parentElement!;
+    // In full-page mode the shell uses flex to consume remaining height —
+    // no `min(70vh,…)` cap.
+    expect(fullShell.style.flex).toContain("1");
+    expect(fullShell.style.height).not.toContain("min(");
+    // A `minHeight` floor keeps React Flow's own controls reachable on
+    // very short viewports.
+    expect(fullShell.style.minHeight).toMatch(/vh|px/);
+  });
+
+  it("pressing Escape exits full-page mode (accessible exit action)", async () => {
+    await mountWithGraph();
+    const toggle = screen.getByTestId("topology-graph-fullpage-toggle");
+    fireEvent.click(toggle); // enter
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    // Dispatch a real keydown on document — the canvas binds its Escape
+    // handler at document level while full-page.
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => {
+      expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    });
+    const section = screen.getByTestId("topology-graph-canvas");
+    expect(section.style.position).not.toBe("fixed");
+  });
+
+  it("toggle button also exits when clicked a second time", async () => {
+    await mountWithGraph();
+    const toggle = screen.getByTestId("topology-graph-fullpage-toggle");
+    fireEvent.click(toggle); // enter
+    expect(toggle.getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(toggle); // exit
+    expect(toggle.getAttribute("aria-pressed")).toBe("false");
+    const section = screen.getByTestId("topology-graph-canvas");
+    expect(section.style.position).not.toBe("fixed");
+  });
+
+  it("entering full-page mode locks body scroll; exiting restores the previous overflow (prevents dual-scrollbar UX)", async () => {
+    // Assert a known baseline so the restore contract is verifiable.
+    document.body.style.overflow = "auto";
+    await mountWithGraph();
+    const toggle = screen.getByTestId("topology-graph-fullpage-toggle");
+    fireEvent.click(toggle);
+    expect(document.body.style.overflow).toBe("hidden");
+    fireEvent.click(toggle);
+    expect(document.body.style.overflow).toBe("auto");
+  });
+
+  it("selection, focus, filter, visibility, contains-toggle, and configured-flow pause ALL persist across enter/exit (no unmount)", async () => {
+    // Focus is a prop, so we drive it via a controlled harness so the enter/
+    // exit toggle does not cause React to clear it. This is the honest
+    // representation of the App-level integration: parent owns focus, canvas
+    // owns filters/visibility/pause/selection/showContains.
+    const client = mockClient();
+    render(
+      <TopologyGraphCanvas
+        result={emptyImportResult()}
+        workerClient={client}
+        focusNodeId="queue:h:q"
+        onFocusChange={() => {}}
+      />,
+    );
+    await waitFor(() => {
+      expect(screen.getByTestId("rf-mock-click-node")).toBeTruthy();
+    });
+    // ── Prime EVERY piece of state the canvas owns internally ─────────────
+    // 1. showContains (contains-toggle)
+    const containsToggle = screen.getByTestId(
+      "topology-graph-contains-toggle",
+    ) as HTMLInputElement;
+    expect(containsToggle.checked).toBe(false);
+    fireEvent.click(containsToggle);
+    expect(containsToggle.checked).toBe(true);
+    // 2. selection (uncontrolled)
+    fireEvent.click(screen.getByTestId("rf-mock-click-node"));
+    await waitFor(() => {
+      expect(screen.getByTestId("topology-graph-selection-summary")).toBeTruthy();
+    });
+    // 3. filters — set a routing-key filter to a non-default value.
+    const routingKeyInput = screen.getByTestId(
+      "topology-filters-routing-key",
+    ) as HTMLInputElement;
+    fireEvent.change(routingKeyInput, { target: { value: "primed-filter-value" } });
+    expect(routingKeyInput.value).toBe("primed-filter-value");
+    // 4. visibility — hide an entity so the visibility hidden-list is
+    //    non-empty. The visibility panel's "hide selected" shortcut acts on
+    //    the current selection, which we just primed above.
+    const hideSelected = screen.getByTestId("topology-visibility-hide-selected");
+    fireEvent.click(hideSelected);
+    await waitFor(() => {
+      expect(screen.getByTestId("topology-visibility-hidden-list")).toBeTruthy();
+    });
+    // 5. configured-flow pause — flip the pause button to "Resume".
+    const pauseBtn = screen.getByTestId(
+      "topology-configured-flow-pause",
+    ) as HTMLButtonElement;
+    // Only assert on non-reduced-motion environments (the button is disabled
+    // when the OS forces reduced motion, which our test env does NOT do).
+    expect(pauseBtn.disabled).toBe(false);
+    expect(pauseBtn.textContent).toContain("Pause");
+    fireEvent.click(pauseBtn);
+    expect(pauseBtn.textContent).toContain("Resume");
+    // 6. focus is already active (prop passed above).
+    expect(screen.getByTestId("topology-graph-focus-summary")).toBeTruthy();
+
+    // Snapshot the ReactFlow subtree init count. Entering / exiting full-page
+    // MUST NOT remount the subtree; if it did, every child would reset
+    // (selection would drop, pause would revert, filter input would lose its
+    // value). We assert onInitCalls stays constant to prove the tree stayed
+    // mounted — the necessary structural precondition for state persistence.
+    const initCountBeforeToggle = rfState.onInitCalls;
+    expect(initCountBeforeToggle).toBeGreaterThan(0);
+
+    // ── Enter full-page ───────────────────────────────────────────────────
+    const fullPageToggle = screen.getByTestId("topology-graph-fullpage-toggle");
+    fireEvent.click(fullPageToggle);
+    // No remount.
+    expect(rfState.onInitCalls).toBe(initCountBeforeToggle);
+    // Every piece of state survives, verified by observable UI:
+    expect(
+      (screen.getByTestId("topology-graph-contains-toggle") as HTMLInputElement)
+        .checked,
+    ).toBe(true);
+    expect(screen.getByTestId("topology-graph-selection-summary")).toBeTruthy();
+    expect(
+      (screen.getByTestId("topology-filters-routing-key") as HTMLInputElement)
+        .value,
+    ).toBe("primed-filter-value");
+    expect(screen.getByTestId("topology-visibility-hidden-list")).toBeTruthy();
+    expect(
+      (screen.getByTestId("topology-configured-flow-pause") as HTMLButtonElement)
+        .textContent,
+    ).toContain("Resume");
+    // focused mode from prop is still active in full-page.
+    expect(screen.getByTestId("topology-graph-focus-summary")).toBeTruthy();
+
+    // ── Exit full-page ────────────────────────────────────────────────────
+    fireEvent.click(fullPageToggle);
+    // Still no remount across the exit transition.
+    expect(rfState.onInitCalls).toBe(initCountBeforeToggle);
+    // All state still there after coming back to inline mode:
+    expect(
+      (screen.getByTestId("topology-graph-contains-toggle") as HTMLInputElement)
+        .checked,
+    ).toBe(true);
+    expect(screen.getByTestId("topology-graph-selection-summary")).toBeTruthy();
+    expect(
+      (screen.getByTestId("topology-filters-routing-key") as HTMLInputElement)
+        .value,
+    ).toBe("primed-filter-value");
+    expect(screen.getByTestId("topology-visibility-hidden-list")).toBeTruthy();
+    expect(
+      (screen.getByTestId("topology-configured-flow-pause") as HTMLButtonElement)
+        .textContent,
+    ).toContain("Resume");
+    expect(screen.getByTestId("topology-graph-focus-summary")).toBeTruthy();
+  });
+
+  it("entering / exiting full-page mode calls fitView via the `[focused, isFullPage]` effect — WITHOUT remounting the ReactFlow subtree (would otherwise reset all child state and only spuriously look like a refit)", async () => {
+    await mountWithGraph();
+    // Baseline: the mount-time flow fired `onInit` exactly once, seeded the
+    // ref, and (per the effect on `[focused, isFullPage]`) already called
+    // fitView once at mount. Capture both counters so we can prove the
+    // toggle-driven increment is NOT a byproduct of a remount.
+    const baselineFit = rfState.fitViewCalls;
+    const baselineInit = rfState.onInitCalls;
+    expect(baselineInit).toBeGreaterThan(0);
+
+    const toggle = screen.getByTestId("topology-graph-fullpage-toggle");
+
+    // ── Enter full-page ───────────────────────────────────────────────────
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(rfState.fitViewCalls).toBeGreaterThan(baselineFit);
+    });
+    // Regression guard: if the enter transition had unmounted / remounted
+    // the ReactFlow subtree, onInit would tick up and fitView's "increment"
+    // would be attributable to the remount rather than to the size-change
+    // refit path in production. onInit MUST stay flat.
+    expect(rfState.onInitCalls).toBe(baselineInit);
+    const afterEnterFit = rfState.fitViewCalls;
+
+    // ── Exit full-page ────────────────────────────────────────────────────
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(rfState.fitViewCalls).toBeGreaterThan(afterEnterFit);
+    });
+    expect(rfState.onInitCalls).toBe(baselineInit);
+  });
+
+  it("regression: fitView is called STRICTLY after the isFullPage state change, not just because ReactFlow re-rendered — asserted by exact increment count", async () => {
+    await mountWithGraph();
+    const baselineFit = rfState.fitViewCalls;
+    const baselineInit = rfState.onInitCalls;
+    const toggle = screen.getByTestId("topology-graph-fullpage-toggle");
+
+    // Trigger an unrelated re-render that does NOT change isFullPage or
+    // focused: flip the "Show contains" toggle. This changes `showContains`,
+    // which flows through the flowGraph memo and re-renders ReactFlow — but
+    // the `[focused, isFullPage]` effect must NOT fire. If it does, our
+    // wiring would be spuriously refitting on any prop change and the
+    // reviewer-flagged concern would be legitimate.
+    const containsToggle = screen.getByTestId(
+      "topology-graph-contains-toggle",
+    ) as HTMLInputElement;
+    fireEvent.click(containsToggle);
+    // Yield a tick to let effects flush.
+    await Promise.resolve();
+    expect(rfState.onInitCalls).toBe(baselineInit);
+    // Contains-toggle should not fire the focus/full-page refit effect.
+    expect(rfState.fitViewCalls).toBe(baselineFit);
+
+    // Now toggle full-page. The size-change refit effect must fire — EXACTLY
+    // once per state flip — and onInit must not tick.
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(rfState.fitViewCalls).toBe(baselineFit + 1);
+    });
+    expect(rfState.onInitCalls).toBe(baselineInit);
+    fireEvent.click(toggle);
+    await waitFor(() => {
+      expect(rfState.fitViewCalls).toBe(baselineFit + 2);
+    });
+    expect(rfState.onInitCalls).toBe(baselineInit);
   });
 });

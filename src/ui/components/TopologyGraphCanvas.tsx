@@ -124,6 +124,14 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
     focusMaxDepth,
   } = props;
   const [showContains, setShowContains] = useState(includeContains);
+  // Full-page mode — when true, the canvas overlays the whole viewport via
+  // `position: fixed` styling. State (selection, focus, filters, visibility,
+  // configured-flow pause) is held in this component's own `useState` hooks,
+  // so entering / leaving full-page mode does NOT unmount the canvas and
+  // therefore does NOT reset any of that state.
+  const [isFullPage, setIsFullPage] = useState(false);
+  const toggleFullPage = useCallback(() => setIsFullPage((prev) => !prev), []);
+  const exitFullPage = useCallback(() => setIsFullPage(false), []);
   const [internalSelectedNodeId, setInternalSelectedNodeId] = useState<string | undefined>(undefined);
   const selectedNodeId = isControlled ? selectedNodeIdProp : internalSelectedNodeId;
   const setSelectedNodeId = useCallback(
@@ -205,14 +213,17 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
     rfInstanceRef.current = instance;
   }, []);
   useEffect(() => {
-    // Only refit when focused mode changes (activation, target change, or
-    // deactivation). The initial mount is already handled by ReactFlow's
-    // `fitView` prop. `focused` is a memo keyed on focusNodeId + graph, so
-    // its identity change captures both the "user opened focus" and the
-    // "graph rebuilt while focused" transitions.
+    // Refit whenever focused mode changes (activation, target change, or
+    // deactivation) OR the full-page overlay toggles — both mutate the
+    // effective graph area and the ReactFlow viewport would otherwise stay
+    // panned/zoomed to the pre-change size. The initial mount is already
+    // handled by ReactFlow's `fitView` prop; extra idempotent calls here
+    // are invisible to the user. `focused` is a memo keyed on focusNodeId
+    // + graph, so its identity change captures both "user opened focus"
+    // and "graph rebuilt while focused" transitions.
     if (!rfInstanceRef.current) return;
     rfInstanceRef.current.fitView({ duration: 0 });
-  }, [focused]);
+  }, [focused, isFullPage]);
   // Explicit fit-on-resize wiring. React Flow does not guarantee a fit-view
   // refresh when its container's box changes size (only when nodes/edges
   // do) — a browser resize that reflows the fluid graph shell would
@@ -220,7 +231,9 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
   // Attach a `ResizeObserver` to the graph container and call `fitView` on
   // every observed size change. `fitView` is idempotent when the graph is
   // already fit, so we don't need to filter the initial notification —
-  // an extra call at mount is invisible to the user.
+  // an extra call at mount is invisible to the user. This same observer
+  // handles the full-page-mode toggle: entering / leaving the mode changes
+  // the graph shell size, the observer fires, the graph refits.
   const graphContainerRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => {
     const container = graphContainerRef.current;
@@ -232,6 +245,25 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
     observer.observe(container);
     return () => observer.disconnect();
   }, []);
+  // Full-page mode: bind Escape to exit and lock body scroll so the user
+  // interacts only with the overlay. `document`/`body` guards keep this
+  // resilient to non-DOM test environments.
+  useEffect(() => {
+    if (!isFullPage) return;
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        exitFullPage();
+      }
+    };
+    document.addEventListener("keydown", handleKey);
+    const previousBodyOverflow = document.body?.style.overflow;
+    if (document.body) document.body.style.overflow = "hidden";
+    return () => {
+      document.removeEventListener("keydown", handleKey);
+      if (document.body) document.body.style.overflow = previousBodyOverflow ?? "";
+    };
+  }, [isFullPage, exitFullPage]);
 
   const selectionSummary = useMemo(() => {
     if (!selectedNodeId) return undefined;
@@ -250,20 +282,33 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
     <section
       aria-label="Topology graph"
       data-testid="topology-graph-canvas"
-      style={panelStyle}
+      data-fullpage={isFullPage ? "true" : "false"}
+      style={isFullPage ? fullPagePanelStyle : panelStyle}
     >
       <div style={headerRowStyle}>
         <h2 style={{ margin: 0 }}>Topology graph</h2>
-        <label style={{ fontSize: "0.85rem", cursor: "pointer" }}>
-          <input
-            type="checkbox"
-            checked={showContains}
-            onChange={(e) => setShowContains(e.target.checked)}
-            data-testid="topology-graph-contains-toggle"
-            style={{ marginRight: "0.35rem" }}
-          />
-          Show <code>contains</code> edges
-        </label>
+        <div style={{ display: "flex", gap: "0.5rem", flexWrap: "wrap", alignItems: "center" }}>
+          <label style={{ fontSize: "0.85rem", cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={showContains}
+              onChange={(e) => setShowContains(e.target.checked)}
+              data-testid="topology-graph-contains-toggle"
+              style={{ marginRight: "0.35rem" }}
+            />
+            Show <code>contains</code> edges
+          </label>
+          <button
+            type="button"
+            onClick={toggleFullPage}
+            aria-pressed={isFullPage}
+            aria-label={isFullPage ? "Exit full-page graph" : "Enter full-page graph"}
+            data-testid="topology-graph-fullpage-toggle"
+            style={fullPageToggleStyle}
+          >
+            {isFullPage ? "Exit full page (Esc)" : "Full page"}
+          </button>
+        </div>
       </div>
       <p style={statsLineStyle} data-testid="topology-graph-stats">
         {flowGraph.nodes.length} nodes · {flowGraph.edges.length} edges (of {rawGraph.nodes.length} · {rawGraph.edges.length})
@@ -321,7 +366,10 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
           </button>
         </div>
       )}
-      <div ref={graphContainerRef} style={graphContainerStyle(heightPx)}>
+      <div
+        ref={graphContainerRef}
+        style={isFullPage ? fullPageGraphShellStyle : graphContainerStyle(heightPx)}
+      >
         <ReactFlow
           nodes={flowGraph.nodes as unknown as Node[]}
           edges={flowGraph.edges as unknown as Edge[]}
@@ -361,6 +409,54 @@ const panelStyle: React.CSSProperties = {
   maxWidth: "100%",
   boxSizing: "border-box",
   marginTop: "1rem",
+};
+
+/**
+ * Full-page overlay style. When the user activates the full-page toggle
+ * the canvas becomes a `position: fixed` overlay spanning the entire
+ * viewport, above the App shell. Uses column flex so the graph shell can
+ * consume `flex: 1` and fill remaining space after the header / bars /
+ * filter/visibility panels. `background: #fff` avoids see-through onto the
+ * page underneath; `overflow: auto` keeps auxiliary panels reachable when
+ * their combined height exceeds the viewport.
+ */
+const fullPagePanelStyle: React.CSSProperties = {
+  position: "fixed",
+  inset: 0,
+  zIndex: 1000,
+  padding: "clamp(0.75rem, 2vw, 1rem)",
+  fontFamily: "system-ui, sans-serif",
+  background: "#fff",
+  boxSizing: "border-box",
+  overflow: "auto",
+  display: "flex",
+  flexDirection: "column",
+  gap: "0.25rem",
+};
+
+/**
+ * In full-page mode the graph consumes all remaining vertical space after
+ * the header, bars, and panels above it. `flex: 1 1 auto` + a small
+ * `minHeight` guard means the container is always at least tall enough for
+ * React Flow's own controls to remain reachable on very short viewports.
+ */
+const fullPageGraphShellStyle: React.CSSProperties = {
+  flex: "1 1 auto",
+  minHeight: "50vh",
+  width: "100%",
+  border: "1px solid #ddd",
+  borderRadius: 6,
+  boxSizing: "border-box",
+};
+
+const fullPageToggleStyle: React.CSSProperties = {
+  padding: "0.25rem 0.6rem",
+  border: "1px solid #4a80cc",
+  background: "#eaf3ff",
+  color: "#1e3a72",
+  borderRadius: 4,
+  cursor: "pointer",
+  fontSize: "0.8rem",
 };
 
 /**
