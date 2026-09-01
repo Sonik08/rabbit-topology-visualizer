@@ -910,4 +910,153 @@ describe("ExplainedStep.condition — per-step conditional-semantics annotation"
     // Wording must still frame this as a failure-path consequence.
     expect(dlxStep.condition).toMatch(/failure|not.*routing decision/i);
   });
+
+  /**
+   * Task 40 requires the flow explorer to "clearly report … unresolved
+   * links." When a shovel or federation references a host/vhost/exchange
+   * that was not observed in the loaded topology, `buildGraph` synthesises
+   * an `external` node at that end — the CONDITION for the touching step
+   * must hedge routing outcome accordingly so the chain view can't imply
+   * the referenced broker was verified.
+   */
+  it("shovels condition prepends an UNRESOLVED-endpoint note when the shovel source is an external node", () => {
+    const hA = hostId("rabbit-a");
+    const vA = vhostId(hA, "/");
+    const xIngest = exchangeId(vA, "x.ingest");
+    const qJobs = queueId(vA, "q.jobs");
+    const p: P = {
+      hosts: [{ id: hA, name: "rabbit-a", sourceFiles: [] }],
+      vhosts: [{ id: vA, hostId: hA, name: "/" }],
+      exchanges: [{ id: xIngest, hostId: hA, vhostId: vA, name: "x.ingest", type: "topic" }],
+      queues: [{ id: qJobs, hostId: hA, vhostId: vA, name: "q.jobs" }],
+      bindings: [
+        { id: "iq", hostId: hA, vhostId: vA, sourceExchangeId: xIngest, destinationId: qJobs, destinationType: "queue", routingKey: "*" },
+      ],
+      shovels: [
+        {
+          id: "shovel:external-source",
+          hostId: hA,
+          vhostId: vA,
+          name: "ingest-external",
+          // rabbit-external is NOT in `hosts`, so buildGraph synthesises
+          // an `external` node for it.
+          source: { host: "rabbit-external", vhost: "/", exchange: "x.remote" },
+          destination: { host: "rabbit-a", vhost: "/", exchange: "x.ingest" },
+        },
+      ],
+      federations: [],
+    };
+    const graph = buildGraph(p);
+    const r = upstreamForQueue(graph, qJobs);
+    const shovelPath = r.paths.find((path) =>
+      path.steps.some((s) => s.kind === "shovels"),
+    )!;
+    const explanation = explainUpstreamPath(shovelPath, qJobs, graph.nodes);
+    const externalToShovelStep = explanation.steps.find(
+      (s) => s.edgeKind === "shovels" && s.fromNode?.kind === "external",
+    )!;
+    expect(externalToShovelStep.condition).toMatch(/^Note:/);
+    expect(externalToShovelStep.condition).toMatch(/UNRESOLVED external broker/);
+    expect(externalToShovelStep.condition).toMatch(/source endpoint references/);
+    expect(externalToShovelStep.condition).toMatch(/not observed in the loaded topology/);
+    // The base runtime-hedge remains — a wiring bug that dropped the
+    // whole condition body would fail this expectation.
+    expect(externalToShovelStep.condition).toMatch(/shovel 'ingest-external'/);
+    expect(externalToShovelStep.condition).toMatch(/paused|misconfigured|unreachable/);
+  });
+
+  it("federation condition prepends an UNRESOLVED-endpoint note when the federation upstream is an external node", () => {
+    const hA = hostId("rabbit-a");
+    const vA = vhostId(hA, "/");
+    const xIn = exchangeId(vA, "x.in");
+    const qTap = queueId(vA, "q.tap");
+    const p: P = {
+      hosts: [{ id: hA, name: "rabbit-a", sourceFiles: [] }],
+      vhosts: [{ id: vA, hostId: hA, name: "/" }],
+      exchanges: [{ id: xIn, hostId: hA, vhostId: vA, name: "x.in", type: "topic" }],
+      queues: [{ id: qTap, hostId: hA, vhostId: vA, name: "q.tap" }],
+      bindings: [
+        { id: "xq", hostId: hA, vhostId: vA, sourceExchangeId: xIn, destinationId: qTap, destinationType: "queue", routingKey: "" },
+      ],
+      shovels: [],
+      federations: [
+        {
+          id: "federation:local/external-fed",
+          hostId: hA,
+          vhostId: vA,
+          name: "external-fed",
+          upstream: { host: "rabbit-external", vhost: "/", exchange: "x.remote" },
+          downstream: { host: "rabbit-a", vhost: "/", exchange: "x.in" },
+        },
+      ],
+    };
+    const graph = buildGraph(p);
+    const r = upstreamForQueue(graph, qTap);
+    const fedPath = r.paths.find((path) =>
+      path.steps.some((s) => s.kind === "federates"),
+    )!;
+    const explanation = explainUpstreamPath(fedPath, qTap, graph.nodes);
+    const externalFedStep = explanation.steps.find(
+      (s) => s.edgeKind === "federates" && s.fromNode?.kind === "external",
+    )!;
+    expect(externalFedStep.condition).toMatch(/^Note:/);
+    expect(externalFedStep.condition).toMatch(/UNRESOLVED external broker/);
+    // The base federation-runtime hedge still surfaces after the note.
+    expect(externalFedStep.condition).toMatch(/federation link 'external-fed'/);
+    expect(externalFedStep.condition).toMatch(/active|reconnection/);
+  });
+
+  it("shovels condition does NOT add the UNRESOLVED note when both endpoints resolve to loaded brokers", () => {
+    // Regression: the note must not fire for fully-resolved shovels, or
+    // every cross-host chain in the topology would carry a spurious
+    // "unresolved" warning.
+    const hA = hostId("rabbit-a");
+    const hB = hostId("rabbit-b");
+    const vA = vhostId(hA, "/");
+    const vB = vhostId(hB, "/");
+    const xIngest = exchangeId(vA, "x.ingest");
+    const qJobs = queueId(vA, "q.jobs");
+    const xRemote = exchangeId(vB, "x.remote");
+    const p: P = {
+      hosts: [
+        { id: hA, name: "rabbit-a", sourceFiles: [] },
+        { id: hB, name: "rabbit-b", sourceFiles: [] },
+      ],
+      vhosts: [
+        { id: vA, hostId: hA, name: "/" },
+        { id: vB, hostId: hB, name: "/" },
+      ],
+      exchanges: [
+        { id: xIngest, hostId: hA, vhostId: vA, name: "x.ingest", type: "topic" },
+        { id: xRemote, hostId: hB, vhostId: vB, name: "x.remote", type: "topic" },
+      ],
+      queues: [{ id: qJobs, hostId: hA, vhostId: vA, name: "q.jobs" }],
+      bindings: [
+        { id: "iq", hostId: hA, vhostId: vA, sourceExchangeId: xIngest, destinationId: qJobs, destinationType: "queue", routingKey: "*" },
+      ],
+      shovels: [
+        {
+          id: "shovel:resolved",
+          hostId: hA,
+          vhostId: vA,
+          name: "resolved-shovel",
+          source: { host: "rabbit-b", vhost: "/", exchange: "x.remote" },
+          destination: { host: "rabbit-a", vhost: "/", exchange: "x.ingest" },
+        },
+      ],
+      federations: [],
+    };
+    const graph = buildGraph(p);
+    // Sanity: no external nodes were synthesised (both endpoints resolved).
+    expect(graph.nodes.filter((n) => n.kind === "external")).toHaveLength(0);
+    const r = upstreamForQueue(graph, qJobs);
+    const shovelPath = r.paths.find((path) =>
+      path.steps.some((s) => s.kind === "shovels"),
+    )!;
+    const explanation = explainUpstreamPath(shovelPath, qJobs, graph.nodes);
+    for (const step of explanation.steps.filter((s) => s.edgeKind === "shovels")) {
+      expect(step.condition).not.toMatch(/^Note:/);
+      expect(step.condition).not.toMatch(/UNRESOLVED/);
+    }
+  });
 });

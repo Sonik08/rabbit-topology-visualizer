@@ -179,11 +179,13 @@ function conditionForStep(
       return "Only when a message is rejected (basic.reject / basic.nack) without requeue, expires via per-message or queue TTL, is dropped for exceeding the queue length or byte limit, or (on quorum queues) exceeds the configured delivery-limit; dead-lettering is a failure-path consequence, not a routing decision the publisher controls.";
     case "shovels": {
       const named = step.label ? ` '${sanitizeInline(step.label)}'` : "";
-      return `Delivery depends on the shovel${named} being running, its ack-mode, and the destination staying reachable — a paused, misconfigured, or unreachable shovel silently blocks this hop.`;
+      const unresolved = unresolvedEndpointNote(step, nodeById, "shovel");
+      return `${unresolved}Delivery depends on the shovel${named} being running, its ack-mode, and the destination staying reachable — a paused, misconfigured, or unreachable shovel silently blocks this hop.`;
     }
     case "federates": {
       const named = step.label ? ` '${sanitizeInline(step.label)}'` : "";
-      return `Delivery depends on the federation link${named} being active and the upstream/downstream broker connection staying healthy — a broken link silently pauses this hop until reconnection succeeds.`;
+      const unresolved = unresolvedEndpointNote(step, nodeById, "federation");
+      return `${unresolved}Delivery depends on the federation link${named} being active and the upstream/downstream broker connection staying healthy — a broken link silently pauses this hop until reconnection succeeds.`;
     }
     case "contains":
       return "Structural containment only — no message flow crosses this edge.";
@@ -238,6 +240,30 @@ function extractExchangeType(node: GraphNode | undefined): string | undefined {
   const data = node.data as ExchangeTypeBearing | undefined;
   const type = data?.type;
   return typeof type === "string" ? type : undefined;
+}
+
+/**
+ * Returns a leading "Note: …" clause when a shovel or federation step
+ * has an unresolved (synthesized `external`) node at either end, and an
+ * empty string otherwise. Task 40 requires the flow explorer to
+ * "clearly report … unresolved links" — the sentence already names the
+ * external endpoint, but the CONDITION needs to hedge the routing
+ * outcome so the operator knows the referenced broker was never
+ * observed in the loaded topology and its behavior cannot be verified.
+ */
+function unresolvedEndpointNote(
+  step: UpstreamStep | DownstreamStep,
+  nodeById: Map<string, GraphNode>,
+  kindWord: "shovel" | "federation",
+): string {
+  const fromExternal = nodeById.get(step.fromNodeId)?.kind === "external";
+  const toExternal = nodeById.get(step.toNodeId)?.kind === "external";
+  if (!fromExternal && !toExternal) return "";
+  let side: string;
+  if (fromExternal && toExternal) side = "both endpoints reference";
+  else if (fromExternal) side = "the source endpoint references";
+  else side = "the destination endpoint references";
+  return `Note: ${side} an UNRESOLVED external broker — the referenced host/vhost/exchange was not observed in the loaded topology, so the ${kindWord}'s runtime behavior at that end cannot be verified from these definitions. `;
 }
 
 function formatRoutingKey(key: string | undefined): string {
