@@ -198,6 +198,15 @@ function PathSection({
               <span style={pathRangeStyle}>
                 {shortenId(explanation.sourceNodeId)} → {shortenId(explanation.targetNodeId)}
               </span>
+              {pathHasUnresolvedEndpoint(explanation) && (
+                <span
+                  style={unresolvedBadgeStyle}
+                  data-testid={`path-explanation-${direction}-item-${index}-unresolved`}
+                  title="This path traverses an external endpoint that was not observed in the loaded topology; the shovel/federation runtime behavior at that end cannot be verified."
+                >
+                  Unresolved endpoint
+                </span>
+              )}
             </div>
             {explanation.steps.length === 0 ? (
               <p style={emptyStepStyle}>{emptyStepMessage}</p>
@@ -245,6 +254,23 @@ function shortenId(id: string): string {
   if (id.length <= 42) return id;
   const tail = id.slice(-38);
   return `…${tail}`;
+}
+
+/**
+ * True when any step in the explanation touches a node the visualizer
+ * synthesised as `external` (a shovel/federation endpoint referencing a
+ * host/vhost/exchange that isn't in the loaded topology). Task 40
+ * requires unresolved links to be reported clearly — the path condition
+ * text already hedges the runtime outcome; this predicate lets the
+ * panel surface a matching per-path badge so the operator can spot
+ * unresolved paths at a glance without reading every condition line.
+ */
+function pathHasUnresolvedEndpoint(explanation: PathExplanation): boolean {
+  for (const step of explanation.steps) {
+    if (step.fromNode?.kind === "external") return true;
+    if (step.toNode?.kind === "external") return true;
+  }
+  return false;
 }
 
 const panelStyle: React.CSSProperties = {
@@ -319,6 +345,18 @@ const pathRangeStyle: React.CSSProperties = {
   fontSize: "0.75rem",
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
   wordBreak: "break-all",
+};
+
+const unresolvedBadgeStyle: React.CSSProperties = {
+  fontSize: "0.7rem",
+  fontWeight: 600,
+  color: "#8a4b00",
+  background: "#fff1d6",
+  border: "1px solid #f0c987",
+  borderRadius: 4,
+  padding: "0.05rem 0.4rem",
+  textTransform: "uppercase",
+  letterSpacing: "0.02em",
 };
 
 const stepListStyle: React.CSSProperties = {

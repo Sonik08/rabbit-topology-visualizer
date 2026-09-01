@@ -421,4 +421,91 @@ describe("PathExplanationPanel", () => {
     expect(condition.textContent).toMatch(/topic pattern/);
     expect(condition.textContent).toContain("'orders.*'");
   });
+
+  it("renders an 'Unresolved endpoint' badge on paths that traverse an external node so unresolved links are visible at a glance", () => {
+    // Task 40 acceptance: "clearly report cycles, truncation, ambiguity,
+    // and unresolved links." The per-step condition already hedges
+    // routing outcome when a shovel/federation touches an external node,
+    // but the operator must be able to spot such paths WITHOUT reading
+    // every condition line. This pins the per-path badge into the DOM.
+    const nodesWithExternal: GraphNode[] = [
+      ...nodes,
+      {
+        id: "external:remote/%2F/x%3Aremote",
+        kind: "external",
+        label: "exchange remote @ remote-broker//",
+        data: {},
+      },
+      { id: "shovel:a:s1", kind: "shovel", label: "s1", data: { name: "s1" } },
+    ];
+    const traversal: UpstreamTraversalResult = {
+      targetNodeId: "queue:a:q1",
+      reachableAncestorIds: ["exchange:a:x1", "shovel:a:s1", "external:remote/%2F/x%3Aremote"],
+      paths: [
+        {
+          sourceNodeId: "external:remote/%2F/x%3Aremote",
+          steps: [
+            {
+              edgeId: "shovel-in:s1<-ext",
+              fromNodeId: "external:remote/%2F/x%3Aremote",
+              toNodeId: "shovel:a:s1",
+              kind: "shovels",
+              label: "s1",
+            },
+            {
+              edgeId: "shovel-out:s1->x1",
+              fromNodeId: "shovel:a:s1",
+              toNodeId: "exchange:a:x1",
+              kind: "shovels",
+              label: "s1",
+            },
+            {
+              edgeId: "b:x1->q1",
+              fromNodeId: "exchange:a:x1",
+              toNodeId: "queue:a:q1",
+              kind: "binds",
+              routingKey: "orders.*",
+            },
+          ],
+        },
+      ],
+      truncated: false,
+      visitedCycles: [],
+    };
+    render(<PathExplanationPanel nodes={nodesWithExternal} traversal={traversal} />);
+    const badge = screen.getByTestId(
+      "path-explanation-upstream-item-0-unresolved",
+    );
+    expect(badge.textContent).toMatch(/Unresolved endpoint/i);
+  });
+
+  it("does NOT render the unresolved-endpoint badge for paths whose steps resolve to loaded brokers", () => {
+    // Regression: the badge must not fire spuriously on ordinary
+    // fully-resolved paths, or every chain in the topology would carry a
+    // permanent "unresolved" warning that operators learn to ignore.
+    const traversal: UpstreamTraversalResult = {
+      targetNodeId: "queue:a:q1",
+      reachableAncestorIds: ["exchange:a:x1"],
+      paths: [
+        {
+          sourceNodeId: "exchange:a:x1",
+          steps: [
+            {
+              edgeId: "b:x1->q1",
+              fromNodeId: "exchange:a:x1",
+              toNodeId: "queue:a:q1",
+              kind: "binds",
+              routingKey: "orders.*",
+            },
+          ],
+        },
+      ],
+      truncated: false,
+      visitedCycles: [],
+    };
+    render(<PathExplanationPanel nodes={nodes} traversal={traversal} />);
+    expect(
+      screen.queryByTestId("path-explanation-upstream-item-0-unresolved"),
+    ).toBeNull();
+  });
 });
