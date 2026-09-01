@@ -754,4 +754,86 @@ describe("PathExplanationPanel", () => {
     const count = screen.getByTestId("path-explanation-upstream-count");
     expect(count.textContent).not.toMatch(/cycle or repeat-visit/);
   });
+
+  it("surfaces per-path hop counts in the path header so operators can triage deep chains within the depth limit", () => {
+    // Task 40 acceptance: "Preserve every applicable branch within the
+    // depth limit". Length is the primary triage signal — operators
+    // scanning multiple paths need to see which chain is 1 hop vs 5
+    // hops without expanding every path body. This pins the hop-count
+    // badge into the DOM.
+    const traversal: UpstreamTraversalResult = {
+      targetNodeId: "queue:a:q1",
+      reachableAncestorIds: ["exchange:a:x1", "exchange:a:x2"],
+      paths: [
+        {
+          // Path 1: 1 hop (direct binding).
+          sourceNodeId: "exchange:a:x1",
+          steps: [
+            {
+              edgeId: "b:x1->q1",
+              fromNodeId: "exchange:a:x1",
+              toNodeId: "queue:a:q1",
+              kind: "binds",
+              routingKey: "a",
+            },
+          ],
+        },
+        {
+          // Path 2: 2 hops (exchange chain).
+          sourceNodeId: "exchange:a:x2",
+          steps: [
+            {
+              edgeId: "b:x2->x1",
+              fromNodeId: "exchange:a:x2",
+              toNodeId: "exchange:a:x1",
+              kind: "binds",
+              routingKey: "b",
+            },
+            {
+              edgeId: "b:x1->q1",
+              fromNodeId: "exchange:a:x1",
+              toNodeId: "queue:a:q1",
+              kind: "binds",
+              routingKey: "a",
+            },
+          ],
+        },
+      ],
+      truncated: false,
+      visitedCycles: [],
+    };
+    render(<PathExplanationPanel nodes={nodes} traversal={traversal} />);
+    // Singular "hop" for the 1-step path.
+    const path0Hops = screen.getByTestId(
+      "path-explanation-upstream-item-0-hops",
+    );
+    expect(path0Hops.textContent).toBe("1 hop");
+    // Plural "hops" for the multi-step path.
+    const path1Hops = screen.getByTestId(
+      "path-explanation-upstream-item-1-hops",
+    );
+    expect(path1Hops.textContent).toBe("2 hops");
+  });
+
+  it("shows '0 hops' when a path has an empty step list (source is the target itself)", () => {
+    // Regression: a path whose source equals the target has zero steps
+    // — the panel renders the "Source is the target" hint in the body,
+    // but the hop-count badge must still fire consistently so a future
+    // wiring bug can't silently drop it for the zero case.
+    const traversal: UpstreamTraversalResult = {
+      targetNodeId: "queue:a:q1",
+      reachableAncestorIds: [],
+      paths: [
+        {
+          sourceNodeId: "queue:a:q1",
+          steps: [],
+        },
+      ],
+      truncated: false,
+      visitedCycles: [],
+    };
+    render(<PathExplanationPanel nodes={nodes} traversal={traversal} />);
+    const hops = screen.getByTestId("path-explanation-upstream-item-0-hops");
+    expect(hops.textContent).toBe("0 hops");
+  });
 });

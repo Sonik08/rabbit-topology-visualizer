@@ -221,6 +221,12 @@ function PathSection({
               <span style={pathRangeStyle}>
                 {shortenId(explanation.sourceNodeId)} → {shortenId(explanation.targetNodeId)}
               </span>
+              <span
+                style={pathHopCountStyle}
+                data-testid={`path-explanation-${direction}-item-${index}-hops`}
+              >
+                {explanation.steps.length} hop{explanation.steps.length === 1 ? "" : "s"}
+              </span>
               {pathHasUnresolvedEndpoint(explanation) && (
                 <span
                   style={unresolvedBadgeStyle}
@@ -368,6 +374,16 @@ const pathRangeStyle: React.CSSProperties = {
   fontSize: "0.75rem",
   fontFamily: "ui-monospace, SFMono-Regular, Menlo, monospace",
   wordBreak: "break-all",
+};
+
+const pathHopCountStyle: React.CSSProperties = {
+  fontSize: "0.7rem",
+  color: "#555",
+  background: "#eef1f5",
+  border: "1px solid #cfd5df",
+  borderRadius: 4,
+  padding: "0.05rem 0.4rem",
+  fontVariantNumeric: "tabular-nums",
 };
 
 const unresolvedBadgeStyle: React.CSSProperties = {
