@@ -5,6 +5,8 @@ import {
   explainDownstreamPath,
   explainUpstreamPath,
 } from "../../../src/core/query/pathExplain";
+import { buildTopologyIndexes } from "../../../src/core/graph/indexes";
+import { findEntity } from "../../../src/core/query/findEntity";
 import {
   exchangeId,
   hostId,
@@ -424,5 +426,143 @@ describe("flow explorer end-to-end (task 40 acceptance chain q50 → … → que
     expect(upIds.has(ids.x4)).toBe(true);
     expect(upIds.has(ids.shovel2)).toBe(true);
     expect(upIds.has(ids.q50)).toBe(false);
+  });
+});
+
+/**
+ * Task-40 acceptance also requires "clearly report cycles … ambiguity, and
+ * unresolved links." The primary chain fixture is acyclic and self-contained,
+ * so those requirements need dedicated regressions that mutate the chain
+ * without weakening the primary tests.
+ */
+describe("flow explorer end-to-end (task 40 acceptance — cycles, ambiguity, unresolved external)", () => {
+  it("reports cycles via visitedCycles and terminates when a back-binding turns the exchange chain into a loop", () => {
+    const { project, ids } = chainFixture();
+    // Add a back-binding: exchange3 → exchange1 with a distinct routing key
+    // so it survives dedup. This closes a cycle: x1 → x3 → x1 → x3 …
+    const cyclicProject: ChainProject = {
+      ...project,
+      bindings: [
+        ...project.bindings,
+        {
+          id: "b:x3->x1",
+          hostId: ids.hA,
+          vhostId: ids.vHostASlash,
+          sourceExchangeId: ids.x3,
+          destinationId: ids.x1,
+          destinationType: "exchange",
+          routingKey: "loop.#",
+        },
+      ],
+    };
+    const graph = buildGraph(cyclicProject);
+    const input = { nodes: graph.nodes, edges: graph.edges };
+    const result = bidirectionalForNode(input, ids.q40, { maxDepth: 32 });
+    // Traversal must terminate (the assertion itself would time out otherwise)
+    // AND the cycle must be reported to the UI — at least one node id on the
+    // x1 ↔ x3 loop is recorded as a visited-cycle back-edge target.
+    const cycleSet = new Set([
+      ...result.upstream.visitedCycles,
+      ...result.downstream.visitedCycles,
+    ]);
+    expect(cycleSet.size).toBeGreaterThan(0);
+    expect(cycleSet.has(ids.x1) || cycleSet.has(ids.x3)).toBe(true);
+    // The chain's original source (q50) is still reachable upstream despite
+    // the cycle — cycle handling MUST NOT drop legitimate ancestry branches.
+    const upIds = new Set(result.upstream.reachableAncestorIds);
+    expect(upIds.has(ids.q50)).toBe(true);
+    expect(upIds.has(ids.shovel1)).toBe(true);
+    expect(upIds.has(ids.x1)).toBe(true);
+    expect(upIds.has(ids.x3)).toBe(true);
+  });
+
+  it("synthesizes an external node on the downstream path when a shovel destination host is not loaded", () => {
+    const { project, ids } = chainFixture();
+    // Rewrite shovel3 to target a host that is not present in the project so
+    // resolveEndpoint has no local match and must synthesize an `external:`
+    // node for the exchange5-on-rabbit-c hop.
+    const projectWithUnresolved: ChainProject = {
+      ...project,
+      shovels: project.shovels.map((s) =>
+        s.id === ids.shovel3
+          ? {
+              ...s,
+              destination: {
+                host: "rabbit-c",
+                vhost: "/",
+                exchange: "exchange5",
+              },
+            }
+          : s,
+      ),
+    };
+    const graph = buildGraph(projectWithUnresolved);
+    const input = { nodes: graph.nodes, edges: graph.edges };
+    const result = bidirectionalForNode(input, ids.q1, { maxDepth: 32 });
+    const downstreamIds = new Set(result.downstream.reachableDescendantIds);
+    // Shovel3 is still reachable downstream from queue1 …
+    expect(downstreamIds.has(ids.shovel3)).toBe(true);
+    // … and its destination now lives on a synthesized external node.
+    const externalDescendants = [...downstreamIds].filter((id) =>
+      id.startsWith("external:"),
+    );
+    expect(externalDescendants.length).toBeGreaterThan(0);
+    // The external node carries the sanitized endpoint ref (kind === external)
+    // so the UI can label the unresolved link explicitly rather than silently
+    // dropping the hop.
+    const externalNode = graph.nodes.find((n) => n.id === externalDescendants[0]);
+    expect(externalNode?.kind).toBe("external");
+    // The known in-project host-b nodes must NOT appear on this branch —
+    // exchange5/queue30 on rabbit-b are still loaded but no shovel edge
+    // targets them any more, so the downstream reach shrinks accordingly.
+    expect(downstreamIds.has(ids.x5)).toBe(false);
+    expect(downstreamIds.has(ids.q30)).toBe(false);
+  });
+
+  it("flags duplicate entity names across vhosts as ambiguous so the caller can disambiguate before traversal", () => {
+    const { project, ids } = chainFixture();
+    // Introduce a second queue also named "queue1" on host-b / vhost /
+    // (colliding with the existing queue1 on host-a / analytics). This is
+    // the ambiguity case the task calls out.
+    const q1OnB = queueId(ids.vHostBSlash, "queue1");
+    const ambiguousProject: ChainProject = {
+      ...project,
+      queues: [
+        ...project.queues,
+        { id: q1OnB, hostId: ids.hB, vhostId: ids.vHostBSlash, name: "queue1" },
+      ],
+    };
+    const indexes = buildTopologyIndexes({
+      hosts: ambiguousProject.hosts,
+      vhosts: ambiguousProject.vhosts,
+      exchanges: ambiguousProject.exchanges,
+      queues: ambiguousProject.queues,
+      shovels: ambiguousProject.shovels,
+      federations: ambiguousProject.federations,
+      policies: [],
+    });
+    const search = findEntity(indexes, "queue1", { kind: "queue" });
+    expect(search.ambiguous).toBe(true);
+    expect(search.matches.length).toBe(2);
+    const matchedIds = new Set(search.matches.map((m) => m.id));
+    expect(matchedIds.has(ids.q1)).toBe(true);
+    expect(matchedIds.has(q1OnB)).toBe(true);
+    // Grouping by (host, vhost) surfaces the disambiguation choices distinctly.
+    expect(search.byVhost.length).toBe(2);
+    // A caller that resolves the ambiguity by picking the host-b/vhost/ id
+    // can traverse that entity independently — bidirectionalForNode operates
+    // on the resolved id, so the two same-named queues never collide.
+    const graph = buildGraph(ambiguousProject);
+    const input = { nodes: graph.nodes, edges: graph.edges };
+    const resolvedOnB = bidirectionalForNode(input, q1OnB, { maxDepth: 32 });
+    // The host-b/vhost/ queue1 has no incoming routing edges (no binding or
+    // shovel targets it), so its upstream reach is empty — proving traversal
+    // did not accidentally follow the host-a "queue1" ancestry.
+    expect(resolvedOnB.upstream.reachableAncestorIds).toEqual([]);
+    const resolvedOnA = bidirectionalForNode(input, ids.q1, { maxDepth: 32 });
+    // The host-a/analytics queue1 keeps its full upstream ancestry.
+    const aUpIds = new Set(resolvedOnA.upstream.reachableAncestorIds);
+    expect(aUpIds.has(ids.q50)).toBe(true);
+    expect(aUpIds.has(ids.shovel2)).toBe(true);
   });
 });
