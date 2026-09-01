@@ -815,6 +815,45 @@ describe("PathExplanationPanel", () => {
     expect(path1Hops.textContent).toBe("2 hops");
   });
 
+  it("cycle-boundary badge carries a title tooltip listing the specific boundary node IDs so operators can look them up in the graph", () => {
+    // Regression: the count alone leaves the operator guessing WHICH
+    // node in a large graph closed the boundary. The node IDs are
+    // available on the traversal result — surface them via a native
+    // browser tooltip so operators can copy-paste to search.
+    const traversal: UpstreamTraversalResult = {
+      targetNodeId: "queue:a:q1",
+      reachableAncestorIds: ["exchange:a:x1"],
+      paths: [
+        {
+          sourceNodeId: "exchange:a:x1",
+          steps: [
+            {
+              edgeId: "b:x1->q1",
+              fromNodeId: "exchange:a:x1",
+              toNodeId: "queue:a:q1",
+              kind: "binds",
+              routingKey: "a",
+            },
+          ],
+        },
+      ],
+      truncated: false,
+      visitedCycles: ["exchange:a:cycle-1", "exchange:a:cycle-2"],
+    };
+    render(<PathExplanationPanel nodes={nodes} traversal={traversal} />);
+    const badge = screen.getByTestId(
+      "path-explanation-upstream-cycle-boundary",
+    );
+    const title = badge.getAttribute("title") ?? "";
+    // Both boundary node IDs must appear in the tooltip text.
+    expect(title).toContain("exchange:a:cycle-1");
+    expect(title).toContain("exchange:a:cycle-2");
+    // Prefix hints at what the operator is looking at.
+    expect(title).toMatch(/Boundary nodes/);
+    // Visible badge text remains the count summary.
+    expect(badge.textContent).toMatch(/cycle or repeat-visit boundary at 2 nodes/);
+  });
+
   it("shows '0 hops' when a path has an empty step list (source is the target itself)", () => {
     // Regression: a path whose source equals the target has zero steps
     // — the panel renders the "Source is the target" hint in the body,
