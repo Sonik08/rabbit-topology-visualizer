@@ -168,6 +168,10 @@ function PathSection({
     direction === "upstream"
       ? "Source is the target — no upstream hops."
       : "Target is the sink — no downstream hops.";
+  const unresolvedCount = explanations.reduce(
+    (acc, expl) => (pathHasUnresolvedEndpoint(expl) ? acc + 1 : acc),
+    0,
+  );
   return (
     <section data-testid={`path-explanation-${direction}`} style={sectionStyle}>
       <header style={headerRowStyle}>
@@ -178,6 +182,9 @@ function PathSection({
         >
           {explanations.length} path{explanations.length === 1 ? "" : "s"}
           {truncated ? " · truncated at max depth" : ""}
+          {unresolvedCount > 0
+            ? ` · ${unresolvedCount} of ${explanations.length} traverse${unresolvedCount === 1 ? "s" : ""} an unresolved external endpoint`
+            : ""}
         </span>
       </header>
       <ol style={listStyle}>

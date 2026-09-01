@@ -508,4 +508,158 @@ describe("PathExplanationPanel", () => {
       screen.queryByTestId("path-explanation-upstream-item-0-unresolved"),
     ).toBeNull();
   });
+
+  it("surfaces a section-level unresolved-paths COUNT in the section header so operators can triage without scanning every path", () => {
+    // Task 40 acceptance: "clearly report … unresolved links." The
+    // per-path badge lets the operator spot ONE path; a section-level
+    // count in the header answers "how many of my paths depend on
+    // brokers the visualizer couldn't verify" at a glance.
+    const external: GraphNode = {
+      id: "external:remote/%2F/x%3Aremote",
+      kind: "external",
+      label: "exchange remote @ remote-broker//",
+      data: {},
+    };
+    const shovel: GraphNode = {
+      id: "shovel:a:s1",
+      kind: "shovel",
+      label: "s1",
+      data: { name: "s1" },
+    };
+    const nodesWithExternal: GraphNode[] = [...nodes, external, shovel];
+    const traversal: UpstreamTraversalResult = {
+      targetNodeId: "queue:a:q1",
+      reachableAncestorIds: [
+        "exchange:a:x1",
+        "exchange:a:x2",
+        "shovel:a:s1",
+        "external:remote/%2F/x%3Aremote",
+      ],
+      paths: [
+        {
+          // Path 1: fully-resolved binding chain, no external endpoint.
+          sourceNodeId: "exchange:a:x1",
+          steps: [
+            {
+              edgeId: "b:x1->q1",
+              fromNodeId: "exchange:a:x1",
+              toNodeId: "queue:a:q1",
+              kind: "binds",
+              routingKey: "a",
+            },
+          ],
+        },
+        {
+          // Path 2: traverses the external → shovel → local exchange chain.
+          sourceNodeId: "external:remote/%2F/x%3Aremote",
+          steps: [
+            {
+              edgeId: "shovel-in:s1<-ext",
+              fromNodeId: "external:remote/%2F/x%3Aremote",
+              toNodeId: "shovel:a:s1",
+              kind: "shovels",
+              label: "s1",
+            },
+            {
+              edgeId: "shovel-out:s1->x2",
+              fromNodeId: "shovel:a:s1",
+              toNodeId: "exchange:a:x2",
+              kind: "shovels",
+              label: "s1",
+            },
+            {
+              edgeId: "b:x2->q1",
+              fromNodeId: "exchange:a:x2",
+              toNodeId: "queue:a:q1",
+              kind: "binds",
+              routingKey: "b",
+            },
+          ],
+        },
+      ],
+      truncated: false,
+      visitedCycles: [],
+    };
+    render(<PathExplanationPanel nodes={nodesWithExternal} traversal={traversal} />);
+    const count = screen.getByTestId("path-explanation-upstream-count");
+    // Total path count still first.
+    expect(count.textContent).toMatch(/^2 paths/);
+    // Section-level unresolved count reads "1 of 2 traverses an
+    // unresolved external endpoint" — singular verb because 1 path.
+    expect(count.textContent).toMatch(
+      /1 of 2 traverses an unresolved external endpoint/,
+    );
+    // Regression: the per-path badge is still present on the affected
+    // path (index 1) and absent from the fully-resolved path (index 0).
+    expect(
+      screen.queryByTestId("path-explanation-upstream-item-0-unresolved"),
+    ).toBeNull();
+    expect(
+      screen.getByTestId("path-explanation-upstream-item-1-unresolved"),
+    ).toBeTruthy();
+  });
+
+  it("uses PLURAL 'traverse' in the section-level count when multiple paths are unresolved", () => {
+    const external: GraphNode = {
+      id: "external:remote/%2F/x%3Aremote",
+      kind: "external",
+      label: "external",
+      data: {},
+    };
+    const shovel: GraphNode = {
+      id: "shovel:a:s1",
+      kind: "shovel",
+      label: "s1",
+      data: { name: "s1" },
+    };
+    const nodesWithExternal: GraphNode[] = [...nodes, external, shovel];
+    const mkExternalPath = (dstEdgeId: string, dstBindingKey: string, dstExchangeId: string): UpstreamTraversalResult["paths"][number] => ({
+      sourceNodeId: "external:remote/%2F/x%3Aremote",
+      steps: [
+        {
+          edgeId: `shovel-in:${dstEdgeId}`,
+          fromNodeId: "external:remote/%2F/x%3Aremote",
+          toNodeId: "shovel:a:s1",
+          kind: "shovels",
+          label: "s1",
+        },
+        {
+          edgeId: `shovel-out:${dstEdgeId}`,
+          fromNodeId: "shovel:a:s1",
+          toNodeId: dstExchangeId,
+          kind: "shovels",
+          label: "s1",
+        },
+        {
+          edgeId: `b:${dstEdgeId}`,
+          fromNodeId: dstExchangeId,
+          toNodeId: "queue:a:q1",
+          kind: "binds",
+          routingKey: dstBindingKey,
+        },
+      ],
+    });
+    const traversal: UpstreamTraversalResult = {
+      targetNodeId: "queue:a:q1",
+      reachableAncestorIds: [
+        "exchange:a:x1",
+        "exchange:a:x2",
+        "shovel:a:s1",
+        "external:remote/%2F/x%3Aremote",
+      ],
+      paths: [
+        mkExternalPath("p1", "a", "exchange:a:x1"),
+        mkExternalPath("p2", "b", "exchange:a:x2"),
+      ],
+      truncated: false,
+      visitedCycles: [],
+    };
+    render(<PathExplanationPanel nodes={nodesWithExternal} traversal={traversal} />);
+    const count = screen.getByTestId("path-explanation-upstream-count");
+    expect(count.textContent).toMatch(
+      /2 of 2 traverse an unresolved external endpoint/,
+    );
+    // Singular verb-form ("traverses") must not appear when count > 1.
+    expect(count.textContent).not.toMatch(/traverses an unresolved/);
+  });
 });
