@@ -54,15 +54,42 @@ export function EntitySearchBox({
   const trimmed = query.trim();
   const searchState = useMemo(() => {
     if (trimmed.length === 0) {
-      return { exact: [] as IndexedEntity[], fuzzy: [] as FuzzySearchMatch[] };
+      return {
+        exact: [] as IndexedEntity[],
+        fuzzy: [] as FuzzySearchMatch[],
+        ambiguity: undefined as AmbiguityDescriptor | undefined,
+        fuzzyTruncated: false,
+      };
     }
     const exactResult = findEntity(indexes, trimmed, { kind });
     const exactIds = new Set(exactResult.matches.map((e) => e.id));
     // Fuzzy results always exclude entities already surfaced by the exact
     // block so the same name doesn't appear twice in the list.
-    const fuzzy = fuzzyFindEntity(indexes, trimmed, { kind, limit })
-      .filter((m) => !exactIds.has(m.entity.id));
-    return { exact: exactResult.matches, fuzzy };
+    //
+    // Truncation detection: request `limit + exactIds.size + 1` from the
+    // scorer so that AFTER excluding every exact match we still have at least
+    // `limit + 1` fuzzy candidates left. Naively asking for `limit + 1` here
+    // was wrong — an exact match that also scored well would occupy one of
+    // those `limit + 1` slots, get filtered out, and leave the truncation
+    // check comparing a shrunken post-filter length against `limit`, silently
+    // missing genuine truncation (regression: 3 exact + 5 real fuzzy at
+    // limit=3 would return `limit+1=4` fuzzy, remove the 3 exact overlaps,
+    // leave 1 fuzzy — `truncated` reads false even though 4 fuzzy matches
+    // were dropped by the cap). The +1 on top of the exact budget preserves
+    // the sentinel-slot rule that distinguishes "exactly `limit` matches"
+    // from "at least one candidate was dropped."
+    const oversampled = fuzzyFindEntity(indexes, trimmed, {
+      kind,
+      limit: limit + exactIds.size + 1,
+    }).filter((m) => !exactIds.has(m.entity.id));
+    const fuzzy = oversampled.slice(0, limit);
+    const fuzzyTruncated = oversampled.length > fuzzy.length;
+    return {
+      exact: exactResult.matches,
+      fuzzy,
+      ambiguity: describeAmbiguity(exactResult.matches),
+      fuzzyTruncated,
+    };
   }, [indexes, trimmed, kind, limit]);
 
   const onQueryChange = useCallback(
@@ -119,6 +146,12 @@ export function EntitySearchBox({
         </p>
       ) : (
         <div data-testid="entity-search-results">
+          {searchState.ambiguity && (
+            <AmbiguityBanner
+              descriptor={searchState.ambiguity}
+              onSelect={onSelect}
+            />
+          )}
           {searchState.exact.length > 0 && (
             <div>
               <h3 style={sectionHeadingStyle}>
@@ -154,11 +187,142 @@ export function EntitySearchBox({
                   </li>
                 ))}
               </ul>
+              {searchState.fuzzyTruncated && (
+                <p
+                  style={truncatedHintStyle}
+                  data-testid="entity-search-fuzzy-truncated"
+                >
+                  Showing the top {searchState.fuzzy.length} fuzzy matches —
+                  more results were truncated. Narrow your query or raise the
+                  result limit to see the rest.
+                </p>
+              )}
             </div>
           )}
         </div>
       )}
     </section>
+  );
+}
+
+/**
+ * Describes when a user-typed name resolves to more than one entity so the
+ * search UI can surface an actionable disambiguation prompt instead of
+ * silently letting the operator pick an arbitrary duplicate. Two distinct
+ * shapes matter:
+ *
+ * - `same-kind`: the same name+kind appears across multiple hosts/vhosts
+ *   (e.g. queue `orders.in` on host A AND host B). This is the classic
+ *   "which cluster did you mean?" ambiguity — the strongest signal.
+ * - `cross-kind`: the same name resolves to entities of different kinds
+ *   (e.g. exchange `audit` AND queue `audit`). Less severe but still worth
+ *   surfacing so the operator picks the right kind.
+ * - `mixed`: both conditions hold at once.
+ *
+ * Ambiguity is only reported when there are ≥2 exact matches; a single
+ * unique exact hit is by definition unambiguous.
+ */
+interface AmbiguityDescriptor {
+  severity: "same-kind" | "cross-kind" | "mixed";
+  totalMatches: number;
+  duplicateName: string;
+  /**
+   * Full `IndexedEntity` per variant — the banner renders one clickable
+   * chooser button per variant and forwards the entity to `onSelect`, so a
+   * search-driven focused-flow pick never has to walk back through the
+   * generic result list when the name is ambiguous.
+   */
+  variants: IndexedEntity[];
+}
+
+function describeAmbiguity(
+  matches: IndexedEntity[],
+): AmbiguityDescriptor | undefined {
+  if (matches.length < 2) return undefined;
+  // Group by (name, kind) — a same-kind duplicate lives in a group of size >1.
+  const byNameKind = new Map<string, IndexedEntity[]>();
+  for (const m of matches) {
+    const key = `${m.name}|${m.kind}`;
+    const bucket = byNameKind.get(key);
+    if (bucket) bucket.push(m);
+    else byNameKind.set(key, [m]);
+  }
+  const hasSameKindDuplicates = [...byNameKind.values()].some(
+    (bucket) => bucket.length > 1,
+  );
+  const kinds = new Set(matches.map((m) => m.kind));
+  const hasCrossKindDuplicates = kinds.size > 1;
+  if (!hasSameKindDuplicates && !hasCrossKindDuplicates) return undefined;
+  const severity: AmbiguityDescriptor["severity"] =
+    hasSameKindDuplicates && hasCrossKindDuplicates
+      ? "mixed"
+      : hasSameKindDuplicates
+        ? "same-kind"
+        : "cross-kind";
+  return {
+    severity,
+    totalMatches: matches.length,
+    // Every exact match shares the typed query text; use the first entity's
+    // canonical name for the human message so we don't surface `.trim()`d
+    // input verbatim.
+    duplicateName: matches[0]!.name,
+    variants: matches,
+  };
+}
+
+function AmbiguityBanner({
+  descriptor,
+  onSelect,
+}: {
+  descriptor: AmbiguityDescriptor;
+  onSelect?: (entity: IndexedEntity) => void;
+}): JSX.Element {
+  const heading =
+    descriptor.severity === "cross-kind"
+      ? `Ambiguous name '${descriptor.duplicateName}': matches ${descriptor.totalMatches} entities across kinds`
+      : descriptor.severity === "same-kind"
+        ? `Ambiguous name '${descriptor.duplicateName}': ${descriptor.totalMatches} matches across hosts/vhosts`
+        : `Ambiguous name '${descriptor.duplicateName}': ${descriptor.totalMatches} matches across kinds AND hosts/vhosts`;
+  return (
+    <aside
+      role="alert"
+      data-testid="entity-search-ambiguity"
+      data-severity={descriptor.severity}
+      style={ambiguityBannerStyle}
+    >
+      <strong>{heading}.</strong>{" "}
+      <span>
+        Pick a specific host/vhost variant below — the focused-flow view can
+        only walk one target at a time and will never silently choose one for
+        you.
+      </span>
+      <ul style={ambiguityListStyle} data-testid="entity-search-ambiguity-choices">
+        {descriptor.variants.map((variant) => (
+          <li key={variant.id}>
+            <button
+              type="button"
+              onClick={onSelect ? () => onSelect(variant) : undefined}
+              disabled={!onSelect}
+              style={ambiguityChoiceStyle}
+              data-testid={`entity-search-ambiguity-choice-${variant.id}`}
+            >
+              <span style={kindBadgeStyle(variant.kind)}>{variant.kind}</span>
+              <code style={{ fontWeight: 600 }}>{variant.name}</code>
+              {variant.hostId && (
+                <span style={ambiguityMetaStyle}>
+                  · host <code>{variant.hostId}</code>
+                </span>
+              )}
+              {variant.vhostId && variant.vhostId !== variant.hostId && (
+                <span style={ambiguityMetaStyle}>
+                  · vhost <code>{variant.vhostId}</code>
+                </span>
+              )}
+            </button>
+          </li>
+        ))}
+      </ul>
+    </aside>
   );
 }
 
@@ -273,6 +437,53 @@ const rowButtonStyle: React.CSSProperties = {
 const fuzzyMetaStyle: React.CSSProperties = {
   color: "#666",
   fontSize: "0.8rem",
+};
+
+const ambiguityBannerStyle: React.CSSProperties = {
+  border: "1px solid #b58900",
+  background: "#fff8e1",
+  color: "#5a4400",
+  padding: "0.5rem 0.75rem",
+  borderRadius: 4,
+  margin: "0.25rem 0 0.5rem",
+  fontSize: "0.85rem",
+};
+
+const ambiguityListStyle: React.CSSProperties = {
+  listStyle: "none",
+  padding: 0,
+  margin: "0.5rem 0 0",
+  display: "flex",
+  flexDirection: "column",
+  gap: "0.25rem",
+};
+
+const ambiguityChoiceStyle: React.CSSProperties = {
+  display: "inline-flex",
+  alignItems: "center",
+  gap: "0.5rem",
+  flexWrap: "wrap",
+  width: "100%",
+  padding: "0.35rem 0.5rem",
+  border: "1px solid #b58900",
+  borderRadius: 4,
+  background: "#fff",
+  cursor: "pointer",
+  fontFamily: "inherit",
+  fontSize: "0.85rem",
+  textAlign: "left",
+};
+
+const ambiguityMetaStyle: React.CSSProperties = {
+  color: "#5a4400",
+  fontSize: "0.75rem",
+};
+
+const truncatedHintStyle: React.CSSProperties = {
+  color: "#555",
+  fontSize: "0.8rem",
+  fontStyle: "italic",
+  margin: "0.35rem 0 0",
 };
 
 function kindBadgeStyle(kind: IndexedEntity["kind"]): React.CSSProperties {

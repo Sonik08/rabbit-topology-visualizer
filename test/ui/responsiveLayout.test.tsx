@@ -391,6 +391,17 @@ function installTopologyWorkerStub(): void {
           nodeIds: new Set(),
           edgeIds: new Set(),
         }),
+        bidirectionalForNode: async () => ({
+          nodeIds: new Set(),
+          edgeIds: new Set(),
+        }),
+        pruneNeighborhood: async (_input: unknown, focusNodeId: string) => ({
+          nodes: [],
+          edges: [],
+          focusNodeId,
+          focusMissing: true,
+          truncated: false,
+        }),
       }),
     };
   });

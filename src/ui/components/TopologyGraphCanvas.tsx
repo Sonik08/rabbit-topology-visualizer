@@ -37,7 +37,7 @@ import {
 } from "../../core/graph/visibility";
 import { composeFocusedTopology } from "./topologyRenderPipeline";
 import { toReactFlowElements, type FlowEdge, type FlowNode } from "./topologyGraphElements";
-import { useTopologyGraph } from "../hooks/useTopologyGraph";
+import { useFocusedNeighborhood, useTopologyGraph } from "../hooks/useTopologyGraph";
 
 export interface TopologyGraphCanvasProps {
   result: ImportResult;
@@ -165,11 +165,37 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
   const { rawGraph, graph, highlight, buildLoading, highlightLoading, selectedNode } =
     useTopologyGraph({ result, filters, selectedNodeId, workerClient: client });
 
+  // Off-main-thread focused-mode subgraph — task 53 requires the focused-
+  // flow explorer to remain responsive via the worker path with stale-
+  // response protection. The hook takes the SAME `graph`+`visibility`
+  // references the pipeline consumes below, stamps its result with a token
+  // capturing those identities, and the pipeline's token check rejects the
+  // payload the moment ANY of those inputs shifts (same-focus visibility
+  // toggle, filter rebuild, depth change) — so the reviewer's specific
+  // failure mode (precomputed accepted based only on `focusNodeId`) is
+  // structurally impossible.
+  const {
+    focusLoading,
+    focusError,
+    retryFocus,
+    precomputed: precomputedFocused,
+  } = useFocusedNeighborhood({
+    graph,
+    visibility,
+    focusNodeId,
+    focusMaxDepth,
+    workerClient: client,
+  });
+
   // Post-filter render pipeline: visibility overlay → optional focused-mode
   // clip → shape for React Flow. Extracted into `composeFocusedTopology` so
   // pipeline-composition tests can call the exact same function the canvas
   // does — reordering or bypassing a stage in the canvas's wiring shows up
-  // as a regression against `composeFocusedTopology`.
+  // as a regression against `composeFocusedTopology`. `syncFallback` stays
+  // OFF here so the expensive traversal never blocks the main thread; when
+  // the worker's precomputed payload doesn't match the current inputs the
+  // pipeline enters `focusPending` and we surface a loading indicator
+  // (below in `focusStatusBanner`) instead of rendering a stale subgraph.
   const composition = useMemo(
     () =>
       composeFocusedTopology({
@@ -177,11 +203,13 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
         visibility,
         focusNodeId,
         focusMaxDepth,
+        precomputedFocused,
       }),
-    [graph, visibility, focusNodeId, focusMaxDepth],
+    [graph, visibility, focusNodeId, focusMaxDepth, precomputedFocused],
   );
   const visible = composition.visible;
   const focused = composition.focused;
+  const focusPending = composition.focusPending;
 
   const flowGraph = useMemo(
     () =>
@@ -324,7 +352,8 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
         {flowGraph.nodes.length} nodes · {flowGraph.edges.length} edges (of {rawGraph.nodes.length} · {rawGraph.edges.length})
         {buildLoading ? " · building graph…" : ""}
         {highlightLoading ? " · computing upstream…" : ""}
-        {!buildLoading && !highlightLoading && (selectedNodeId ? " · click background or the same node again to clear selection" : " · click a queue or exchange to highlight its upstream path")}
+        {focusLoading ? " · computing focus subgraph…" : ""}
+        {!buildLoading && !highlightLoading && !focusLoading && (selectedNodeId ? " · click background or the same node again to clear selection" : " · click a queue or exchange to highlight its upstream path")}
       </p>
       <ConfiguredFlowLegend
         paused={configuredFlowPaused}
@@ -341,26 +370,48 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
         onChange={setVisibility}
       />
       {focused && (
-        <div style={focusBarStyle} data-testid="topology-graph-focus-summary">
+        <div
+          style={focusError ? focusErrorBarStyle : focusBarStyle}
+          data-testid="topology-graph-focus-summary"
+          data-focus-pending={focusPending && !focusError ? "true" : "false"}
+          data-focus-error={focusError ? "true" : "false"}
+          role={focusError ? "alert" : undefined}
+        >
           <span>
-            {focused.focusMissing
-              ? `Focus target '${focused.focusNodeId}' is not in the current graph — showing an empty focused view.`
-              : `Focused on ${focused.focusNodeId}: ${focused.nodes.length} node${
-                  focused.nodes.length === 1 ? "" : "s"
-                }, ${focused.edges.length} edge${focused.edges.length === 1 ? "" : "s"}${
-                  focused.truncated ? " (truncated at max depth)" : ""
-                }.`}
+            {focusError
+              ? `Focus subgraph computation failed for '${focused.focusNodeId}': ${focusError}`
+              : focusPending
+                ? `Computing focus subgraph for '${focused.focusNodeId}'…`
+                : focused.focusMissing
+                  ? `Focus target '${focused.focusNodeId}' is not in the current graph — showing an empty focused view.`
+                  : `Focused on ${focused.focusNodeId}: ${focused.nodes.length} node${
+                      focused.nodes.length === 1 ? "" : "s"
+                    }, ${focused.edges.length} edge${focused.edges.length === 1 ? "" : "s"}${
+                      focused.truncated ? " (truncated at max depth)" : ""
+                    }.`}
           </span>
-          {onFocusChange && (
-            <button
-              type="button"
-              onClick={() => onFocusChange(undefined)}
-              data-testid="topology-graph-clear-focus"
-              style={clearButtonStyle}
-            >
-              Show full topology
-            </button>
-          )}
+          <div style={{ display: "flex", gap: "0.4rem", flexWrap: "wrap" }}>
+            {focusError && (
+              <button
+                type="button"
+                onClick={retryFocus}
+                data-testid="topology-graph-focus-retry"
+                style={clearButtonStyle}
+              >
+                Retry
+              </button>
+            )}
+            {onFocusChange && (
+              <button
+                type="button"
+                onClick={() => onFocusChange(undefined)}
+                data-testid="topology-graph-clear-focus"
+                style={clearButtonStyle}
+              >
+                Show full topology
+              </button>
+            )}
+          </div>
         </div>
       )}
       {selectionSummary && (
@@ -539,6 +590,13 @@ const focusBarStyle: React.CSSProperties = {
   border: "1px solid #4a80cc",
   borderRadius: 4,
   fontSize: "0.8rem",
+};
+
+const focusErrorBarStyle: React.CSSProperties = {
+  ...focusBarStyle,
+  background: "#fdecea",
+  border: "1px solid #c0392b",
+  color: "#7a1a10",
 };
 
 const clearButtonStyle: React.CSSProperties = {

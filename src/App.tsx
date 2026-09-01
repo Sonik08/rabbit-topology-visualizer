@@ -12,14 +12,25 @@ export function App(): JSX.Element {
   // selection. Selecting a search result focuses the matching graph node
   // without any extra clicks.
   const [selectedNodeId, setSelectedNodeId] = useState<string | undefined>(undefined);
+  // Focus state is hoisted alongside selection so a search-driven pick clips
+  // the canvas to that entity's reachable message-flow neighborhood (task 53's
+  // "switch the canvas into a focused mode"), not merely highlights the node
+  // in the full topology. Canvas-driven `onFocusChange(undefined)` (Show full
+  // topology) clears the focus without dropping the highlight, so the user
+  // can keep inspecting the same entity in unfocused context.
+  const [focusNodeId, setFocusNodeId] = useState<string | undefined>(undefined);
   const handleImported = useCallback((next: ImportResult) => {
     setResult(next);
     // A new import invalidates the current selection — the previously
-    // highlighted node id may not exist in the freshly built graph.
+    // highlighted node id may not exist in the freshly built graph. Same
+    // for focus: a stale focus id would otherwise show the empty-view
+    // banner against a freshly built graph.
     setSelectedNodeId(undefined);
+    setFocusNodeId(undefined);
   }, []);
   const handleSearchSelect = useCallback((entity: IndexedEntity) => {
     setSelectedNodeId(entity.id);
+    setFocusNodeId(entity.id);
   }, []);
   return (
     <main style={appMainStyle}>
@@ -36,6 +47,8 @@ export function App(): JSX.Element {
           result={result}
           selectedNodeId={selectedNodeId}
           onSelectionChange={setSelectedNodeId}
+          focusNodeId={focusNodeId}
+          onFocusChange={setFocusNodeId}
         />
       )}
     </main>

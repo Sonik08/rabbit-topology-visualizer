@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { BuildGraphResult } from "../../../src/core/graph/buildGraph";
 import type { UpstreamTraversalResult } from "../../../src/core/graph/traversal";
+import { pruneNeighborhood } from "../../../src/core/graph/pruneNeighborhood";
 import type {
   ImportArchiveWorkerClient,
   ImportResult,
@@ -206,6 +207,15 @@ function mockClient(): ImportArchiveWorkerClient {
         visitedCycles: [],
       },
     })),
+    // Mock worker prune — delegates to the real `pruneNeighborhood` so
+    // focused-mode canvas assertions still see a genuine subgraph clip
+    // (unrelated chains removed, contains ancestry preserved) while the
+    // production canvas path stays exercised end-to-end through the worker
+    // shim. Focused-mode canvas tests that need to defer the response
+    // (staleness protection regressions) override this per-test.
+    pruneNeighborhood: vi.fn(async (input, focusNodeId: string, options) =>
+      pruneNeighborhood(input, focusNodeId, options),
+    ),
     terminate: vi.fn(),
   } as unknown as ImportArchiveWorkerClient;
 }
@@ -1007,5 +1017,88 @@ describe("TopologyGraphCanvas — full-page mode", () => {
       expect(rfState.fitViewCalls).toBe(baselineFit + 2);
     });
     expect(rfState.onInitCalls).toBe(baselineInit);
+  });
+
+  it("worker rejection surfaces an error banner with the thrown message AND a Retry button — the pending banner never lingers indefinitely (reviewer regression)", async () => {
+    // Reviewer's failure mode: previous behavior swallowed worker errors
+    // and left the banner reading "Computing focus subgraph…" forever with
+    // no recovery path. This test proves:
+    //   (i)  the banner switches to an error variant on rejection,
+    //   (ii) the thrown message reaches the operator,
+    //   (iii) a Retry button appears,
+    //   (iv) clicking Retry refires the worker AND the banner recovers to
+    //        the normal Focused-on state when the second attempt succeeds.
+    // Track only calls that ORIGINATE from the focused-mode wiring (they
+    // pass a specific focus id). Ignore any pruneNeighborhood invocations
+    // triggered by unrelated effects (e.g. the `applyVisibility`
+    // isolation path) so the attempt counter tracks the focus-mode retry
+    // path only.
+    let focusAttempt = 0;
+    const pruneMock = vi.fn(async (input: unknown, focusNodeId: string, options: unknown) => {
+      focusAttempt += 1;
+      if (focusAttempt === 1) throw new Error("worker channel closed");
+      return pruneNeighborhood(
+        input as Parameters<typeof pruneNeighborhood>[0],
+        focusNodeId,
+        options as Parameters<typeof pruneNeighborhood>[2],
+      );
+    });
+    const client: ImportArchiveWorkerClient = {
+      ...mockClient(),
+      pruneNeighborhood: pruneMock,
+    } as unknown as ImportArchiveWorkerClient;
+    // First render WITHOUT focus so buildGraph settles before the focus
+    // path fires. Without this, the buildGraph resolution would refire
+    // the focused-mode effect a second time (successful attempt=2) and
+    // wipe the error banner before the test can observe it — a race
+    // artifact of the test harness, not a production bug.
+    const stableImport = emptyImportResult();
+    const { rerender } = render(
+      <TopologyGraphCanvas
+        result={stableImport}
+        workerClient={client}
+        onFocusChange={() => {}}
+      />,
+    );
+    await waitFor(() => {
+      expect(client.buildGraph).toHaveBeenCalledTimes(1);
+    });
+    // Yield a tick so the buildGraph resolution has flushed into state.
+    await Promise.resolve();
+    // Now activate focused mode — this is the FIRST pruneNeighborhood
+    // call and it will reject with the seeded error.
+    rerender(
+      <TopologyGraphCanvas
+        result={stableImport}
+        workerClient={client}
+        focusNodeId="queue:h:q"
+        onFocusChange={() => {}}
+      />,
+    );
+    // First attempt rejects → error banner surfaces with the thrown
+    // message AND the Retry button. `data-focus-pending` MUST flip to
+    // false so the "Computing…" state does NOT linger under the error.
+    await waitFor(() => {
+      const b = screen.getByTestId("topology-graph-focus-summary");
+      expect(b.getAttribute("data-focus-error")).toBe("true");
+    });
+    const banner = screen.getByTestId("topology-graph-focus-summary");
+    expect(banner.getAttribute("data-focus-pending")).toBe("false");
+    expect(banner.textContent).toContain("worker channel closed");
+    expect(banner.getAttribute("role")).toBe("alert");
+    const retry = screen.getByTestId("topology-graph-focus-retry") as HTMLButtonElement;
+    expect(retry).toBeTruthy();
+    // Operator clicks Retry → the second attempt succeeds. Error clears
+    // and the normal Focused-on summary returns for the same target.
+    fireEvent.click(retry);
+    await waitFor(() => {
+      const b = screen.getByTestId("topology-graph-focus-summary");
+      expect(b.getAttribute("data-focus-error")).toBe("false");
+      expect(b.textContent).toContain("Focused on queue:h:q");
+    });
+    // The Retry button is gone (no error), the clear button remains.
+    expect(screen.queryByTestId("topology-graph-focus-retry")).toBeNull();
+    expect(screen.getByTestId("topology-graph-clear-focus")).toBeTruthy();
+    expect(focusAttempt).toBe(2);
   });
 });

@@ -9,6 +9,11 @@ import {
   type UpstreamTraversalResult,
 } from "../graph/traversal";
 import {
+  pruneNeighborhood,
+  type PruneNeighborhoodOptions,
+  type PruneNeighborhoodResult,
+} from "../graph/pruneNeighborhood";
+import {
   importTopologyArchive,
   importTopologyBatch,
   type BatchImportInput,
@@ -49,6 +54,13 @@ export type WorkerRequest =
       input: UpstreamGraphInput;
       targetNodeId: string;
       options?: UpstreamTraversalOptions;
+    }
+  | {
+      id: number;
+      kind: "prune-neighborhood";
+      input: BuildGraphResult;
+      focusNodeId: string;
+      options?: PruneNeighborhoodOptions;
     };
 
 /** Success/failure envelope posted back from the worker. */
@@ -73,6 +85,12 @@ export type WorkerResponse =
       status: "ok";
       kind: "bidirectional-for-node";
       result: BidirectionalTraversalResult;
+    }
+  | {
+      id: number;
+      status: "ok";
+      kind: "prune-neighborhood";
+      result: PruneNeighborhoodResult;
     }
   | {
       id: number;
@@ -176,6 +194,19 @@ export async function handleImportArchiveMessage(
         const options = record.options as UpstreamTraversalOptions | undefined;
         const result = bidirectionalForNode(input, target, options);
         return { id, status: "ok", kind: "bidirectional-for-node", result };
+      }
+      case "prune-neighborhood": {
+        const input = record.input as BuildGraphResult | undefined;
+        const focus = record.focusNodeId;
+        if (!input) throw new Error("prune-neighborhood request is missing 'input'.");
+        if (typeof focus !== "string") {
+          throw new Error(
+            "prune-neighborhood request is missing 'focusNodeId' string.",
+          );
+        }
+        const options = record.options as PruneNeighborhoodOptions | undefined;
+        const result = pruneNeighborhood(input, focus, options);
+        return { id, status: "ok", kind: "prune-neighborhood", result };
       }
       default:
         throw new Error(`Unknown request kind '${describe(kind)}'.`);

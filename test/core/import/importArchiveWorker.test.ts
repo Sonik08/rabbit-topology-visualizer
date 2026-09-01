@@ -975,3 +975,122 @@ describe("createMainThreadClient — bidirectionalForNode fallback (Worker-unava
     ).rejects.toThrow(/terminated/);
   });
 });
+
+describe("handleImportArchiveMessage — prune-neighborhood dispatcher (task 53 worker protocol)", () => {
+  it("processes a well-formed prune-neighborhood request and returns the clipped subgraph with the request id echoed", async () => {
+    const input = bidirectionalFixture();
+    const response = await handleImportArchiveMessage({
+      id: 51,
+      kind: "prune-neighborhood",
+      input,
+      focusNodeId: "shovel:a:s1",
+      options: { direction: "both", maxDepth: 5 },
+    });
+    expect(response.id).toBe(51);
+    expect(response.status).toBe("ok");
+    if (response.status !== "ok") throw new Error("expected ok");
+    expect(response.kind).toBe("prune-neighborhood");
+    if (response.kind !== "prune-neighborhood") throw new Error("expected prune-neighborhood");
+    expect(response.result.focusNodeId).toBe("shovel:a:s1");
+    // The unrelated noise pair must not survive the clip.
+    const nodeIds = new Set(response.result.nodes.map((n) => n.id));
+    expect(nodeIds.has("exchange:a:noise")).toBe(false);
+    expect(nodeIds.has("queue:a:noise")).toBe(false);
+    // Shovel neighborhood walks both directions from s1.
+    expect(nodeIds.has("shovel:a:s1")).toBe(true);
+    expect(nodeIds.has("exchange:a:x2")).toBe(true);
+    expect(nodeIds.has("exchange:a:x3")).toBe(true);
+  });
+
+  it("rejects a prune-neighborhood request missing `input` with a structured error envelope", async () => {
+    const response = await handleImportArchiveMessage({
+      id: 52,
+      kind: "prune-neighborhood",
+      focusNodeId: "shovel:a:s1",
+    });
+    expect(response.status).toBe("error");
+    if (response.status !== "error") throw new Error("expected error");
+    expect(response.id).toBe(52);
+    expect(response.message).toMatch(/prune-neighborhood.*missing 'input'/i);
+  });
+
+  it("rejects a prune-neighborhood request missing `focusNodeId` with a structured error envelope", async () => {
+    const response = await handleImportArchiveMessage({
+      id: 53,
+      kind: "prune-neighborhood",
+      input: bidirectionalFixture(),
+    });
+    expect(response.status).toBe("error");
+    if (response.status !== "error") throw new Error("expected error");
+    expect(response.id).toBe(53);
+    expect(response.message).toMatch(/prune-neighborhood.*focusNodeId/i);
+  });
+
+  it("focus id not in the graph returns an OK envelope with `focusMissing: true` — safe no-op, not an error", async () => {
+    const response = await handleImportArchiveMessage({
+      id: 54,
+      kind: "prune-neighborhood",
+      input: bidirectionalFixture(),
+      focusNodeId: "queue:a:ghost",
+    });
+    if (response.status !== "ok" || response.kind !== "prune-neighborhood") {
+      throw new Error("expected ok prune-neighborhood response");
+    }
+    expect(response.result.focusMissing).toBe(true);
+    expect(response.result.nodes).toEqual([]);
+  });
+});
+
+describe("createImportArchiveWorkerClient — pruneNeighborhood round-trip + malformed-response handling", () => {
+  it("round-trips a prune-neighborhood request through the shim worker and resolves with the clipped subgraph", async () => {
+    const shim = createShimWorker((req) => handleImportArchiveMessage(req));
+    const client = createImportArchiveWorkerClient({ createWorker: () => shim });
+    const result = await client.pruneNeighborhood(
+      bidirectionalFixture() as never,
+      "shovel:a:s1",
+      { direction: "both", maxDepth: 5 },
+    );
+    expect(result.focusNodeId).toBe("shovel:a:s1");
+    expect(result.nodes.map((n) => n.id)).toContain("shovel:a:s1");
+    client.terminate();
+  });
+
+  it("worker responds with the WRONG kind — client rejects with 'unexpected response kind … prune-neighborhood' instead of silently accepting a mismatched envelope", async () => {
+    const shim = createShimWorker(async (req) => ({
+      id: (req as { id: number }).id,
+      status: "ok" as const,
+      kind: "build-graph" as const,
+      result: { nodes: [], edges: [], diagnostics: [] },
+    }));
+    const client = createImportArchiveWorkerClient({ createWorker: () => shim });
+    await expect(
+      client.pruneNeighborhood(
+        bidirectionalFixture() as never,
+        "shovel:a:s1",
+      ),
+    ).rejects.toThrow(/unexpected response kind.*prune-neighborhood/i);
+    client.terminate();
+  });
+});
+
+describe("createMainThreadClient — pruneNeighborhood fallback (Worker-unavailable path)", () => {
+  it("runs prune-neighborhood end-to-end on the main thread and returns a subgraph with the focus id echoed", async () => {
+    const client = createMainThreadClient();
+    const result = await client.pruneNeighborhood(
+      bidirectionalFixture() as never,
+      "shovel:a:s1",
+      { direction: "both", maxDepth: 5 },
+    );
+    expect(result.focusNodeId).toBe("shovel:a:s1");
+    expect(result.nodes.map((n) => n.id)).toContain("shovel:a:s1");
+    client.terminate();
+  });
+
+  it("after terminate() the fallback client rejects further pruneNeighborhood calls with a `terminated` message", async () => {
+    const client = createMainThreadClient();
+    client.terminate();
+    await expect(
+      client.pruneNeighborhood(bidirectionalFixture() as never, "shovel:a:s1"),
+    ).rejects.toThrow(/terminated/);
+  });
+});

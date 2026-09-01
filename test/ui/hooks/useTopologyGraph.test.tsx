@@ -9,8 +9,17 @@ import type {
   ImportArchiveWorkerClient,
   ImportResult,
 } from "../../../src/core/import";
-import { useTopologyGraph } from "../../../src/ui/hooks/useTopologyGraph";
+import type { PruneNeighborhoodResult } from "../../../src/core/graph/pruneNeighborhood";
+import {
+  useFocusedNeighborhood,
+  useTopologyGraph,
+} from "../../../src/ui/hooks/useTopologyGraph";
 import { createEmptyFilterState } from "../../../src/ui/components/TopologyFiltersPanel";
+import {
+  createEmptyVisibility,
+  hideNodes,
+  type VisibilityState,
+} from "../../../src/core/graph/visibility";
 
 afterEach(() => cleanup());
 
@@ -82,6 +91,14 @@ function mockClient(overrides?: Partial<ImportArchiveWorkerClient>): ImportArchi
         ...BIDIRECTIONAL_TRAVERSAL.downstream,
         targetNodeId,
       },
+    })),
+    pruneNeighborhood: vi.fn(async (input, focusNodeId: string) => ({
+      nodes: input.nodes,
+      edges: input.edges,
+      diagnostics: input.diagnostics ?? [],
+      focusNodeId,
+      truncated: false,
+      focusMissing: false,
     })),
     terminate: vi.fn(),
     ...overrides,
@@ -630,6 +647,582 @@ describe("useTopologyGraph — production wiring through the worker client", () 
     });
     expect(client.bidirectionalForNode).not.toHaveBeenCalled();
     expect(result.current.highlight.nodeIds.size).toBe(0);
+  });
+
+  it("regression: OUT-OF-ORDER worker resolution — a stale earlier-selection traversal that resolves AFTER the newer selection's traversal must NOT overwrite the current highlight (task 53 search-driven staleness protection)", async () => {
+    // The existing rapid-selection regression covers first-in-first-out
+    // resolution. This test hammers the harder case a search-driven flow can
+    // exercise: the user clicks search result A, then immediately picks
+    // search result B while A's worker call is still in flight; B's traversal
+    // resolves FIRST (fast) and A's resolves LATER (slow). The hook's
+    // cancelled-guard must reject A's late arrival so the on-screen highlight
+    // keeps pointing at B, not silently regress to the stale A view.
+    let resolveA: ((r: BidirectionalTraversalResult) => void) | undefined;
+    let resolveB: ((r: BidirectionalTraversalResult) => void) | undefined;
+    const graphWithTwoQueues: BuildGraphResult = {
+      nodes: [
+        { id: "host:h", kind: "host", label: "h", data: { id: "host:h", name: "h", sourceFiles: [] } },
+        { id: "vhost:h:/", kind: "vhost", label: "/", data: { id: "vhost:h:/", hostId: "host:h", name: "/" } },
+        { id: "exchange:h:x", kind: "exchange", label: "x", data: {} },
+        { id: "queue:h:q1", kind: "queue", label: "q1", data: {} },
+        { id: "queue:h:q2", kind: "queue", label: "q2", data: {} },
+      ],
+      edges: [
+        { id: "c:host->vhost", from: "host:h", to: "vhost:h:/", kind: "contains" },
+        { id: "c:vhost->x", from: "vhost:h:/", to: "exchange:h:x", kind: "contains" },
+        { id: "c:vhost->q1", from: "vhost:h:/", to: "queue:h:q1", kind: "contains" },
+        { id: "c:vhost->q2", from: "vhost:h:/", to: "queue:h:q2", kind: "contains" },
+        { id: "b:x->q1", from: "exchange:h:x", to: "queue:h:q1", kind: "binds", routingKey: "k" },
+        { id: "b:x->q2", from: "exchange:h:x", to: "queue:h:q2", kind: "binds", routingKey: "k" },
+      ],
+      diagnostics: [],
+    };
+    const bidirectionalMock = vi
+      .fn<[unknown, string, unknown?], Promise<BidirectionalTraversalResult>>()
+      .mockImplementationOnce(
+        () =>
+          new Promise<BidirectionalTraversalResult>((resolve) => {
+            resolveA = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<BidirectionalTraversalResult>((resolve) => {
+            resolveB = resolve;
+          }),
+      );
+    const client = mockClient({
+      buildGraph: vi.fn(async () => graphWithTwoQueues),
+      bidirectionalForNode: bidirectionalMock,
+    });
+    const stableResult = emptyImportResult();
+    const stableFilters = createEmptyFilterState();
+    const { result, rerender } = renderHook(
+      (props: { selectedNodeId: string | undefined }) =>
+        useTopologyGraph({
+          result: stableResult,
+          filters: stableFilters,
+          selectedNodeId: props.selectedNodeId,
+          workerClient: client,
+        }),
+      { initialProps: { selectedNodeId: undefined } },
+    );
+    await waitFor(() => {
+      expect(result.current.rawGraph.nodes.length).toBe(
+        graphWithTwoQueues.nodes.length,
+      );
+    });
+    // Search-driven selection A: q1.
+    rerender({ selectedNodeId: "queue:h:q1" });
+    await waitFor(() => {
+      expect(client.bidirectionalForNode).toHaveBeenCalledTimes(1);
+    });
+    // Search-driven selection B: q2 — while A is still in flight.
+    rerender({ selectedNodeId: "queue:h:q2" });
+    await waitFor(() => {
+      expect(client.bidirectionalForNode).toHaveBeenCalledTimes(2);
+    });
+    // Resolve B FIRST — the current selection matches so the highlight
+    // adopts it and stops loading.
+    await act(async () => {
+      resolveB?.({
+        targetNodeId: "queue:h:q2",
+        upstream: {
+          targetNodeId: "queue:h:q2",
+          reachableAncestorIds: ["exchange:h:x"],
+          paths: [
+            {
+              sourceNodeId: "exchange:h:x",
+              steps: [
+                {
+                  edgeId: "b:x->q2",
+                  fromNodeId: "exchange:h:x",
+                  toNodeId: "queue:h:q2",
+                  kind: "binds",
+                  routingKey: "k",
+                },
+              ],
+            },
+          ],
+          truncated: false,
+          visitedCycles: [],
+        },
+        downstream: {
+          targetNodeId: "queue:h:q2",
+          reachableDescendantIds: [],
+          paths: [],
+          truncated: false,
+          visitedCycles: [],
+        },
+      });
+    });
+    await waitFor(() => {
+      expect(result.current.highlight.nodeIds.has("queue:h:q2")).toBe(true);
+      expect(result.current.highlight.edgeIds.has("b:x->q2")).toBe(true);
+      expect(result.current.highlightLoading).toBe(false);
+    });
+    // Now resolve A LATE (out of order). The cancelled flag from A's cleanup
+    // must reject its `.then` so the q2 highlight survives untouched.
+    await act(async () => {
+      resolveA?.({
+        targetNodeId: "queue:h:q1",
+        upstream: {
+          targetNodeId: "queue:h:q1",
+          reachableAncestorIds: ["exchange:h:x"],
+          paths: [
+            {
+              sourceNodeId: "exchange:h:x",
+              steps: [
+                {
+                  edgeId: "b:x->q1",
+                  fromNodeId: "exchange:h:x",
+                  toNodeId: "queue:h:q1",
+                  kind: "binds",
+                  routingKey: "k",
+                },
+              ],
+            },
+          ],
+          truncated: false,
+          visitedCycles: [],
+        },
+        downstream: {
+          targetNodeId: "queue:h:q1",
+          reachableDescendantIds: [],
+          paths: [],
+          truncated: false,
+          visitedCycles: [],
+        },
+      });
+      await Promise.resolve();
+    });
+    // Highlight MUST still be the q2 result — q1's late arrival was rejected.
+    expect(result.current.highlight.nodeIds.has("queue:h:q2")).toBe(true);
+    expect(result.current.highlight.edgeIds.has("b:x->q2")).toBe(true);
+    expect(result.current.highlight.nodeIds.has("queue:h:q1")).toBe(false);
+    expect(result.current.highlight.edgeIds.has("b:x->q1")).toBe(false);
+  });
+
+  it("useFocusedNeighborhood — regression: focused-mode subgraph is computed on the WORKER (task 53 responsive-worker-path requirement)", async () => {
+    // Task 53 acceptance: focused traversal must route through the worker
+    // so a large graph with a deep focus radius doesn't stall the UI frame.
+    // Assert `workerClient.pruneNeighborhood` is invoked with the exact
+    // input graph AND the focus id AND (task 53) `direction: "both"` so
+    // both incoming and outgoing message-flow chains land in the subgraph.
+    const focusResult: PruneNeighborhoodResult = {
+      nodes: [
+        { id: "queue:h:q1", kind: "queue", label: "q1", data: {} },
+        { id: "exchange:h:x", kind: "exchange", label: "x", data: {} },
+      ],
+      edges: [
+        { id: "b:x->q1", from: "exchange:h:x", to: "queue:h:q1", kind: "binds", routingKey: "k" },
+      ],
+      diagnostics: [],
+      focusNodeId: "queue:h:q1",
+      truncated: false,
+      focusMissing: false,
+    };
+    const pruneMock = vi.fn(async () => focusResult);
+    const client = mockClient({ pruneNeighborhood: pruneMock });
+    const graphFixture: BuildGraphResult = {
+      nodes: focusResult.nodes,
+      edges: focusResult.edges,
+      diagnostics: [],
+    };
+    const stableVisibility = createEmptyVisibility();
+    const { result } = renderHook(() =>
+      useFocusedNeighborhood({
+        graph: graphFixture,
+        visibility: stableVisibility,
+        focusNodeId: "queue:h:q1",
+        focusMaxDepth: 3,
+        workerClient: client,
+      }),
+    );
+    await waitFor(() => {
+      expect(pruneMock).toHaveBeenCalledTimes(1);
+      expect(result.current.focused?.focusNodeId).toBe("queue:h:q1");
+      expect(result.current.focusLoading).toBe(false);
+    });
+    // Wire-shape check — worker receives the visibility-applied graph
+    // (identical content when visibility is empty), the focus id, AND
+    // `direction: "both"` so both incoming and outgoing chains land in
+    // the subgraph.
+    expect(pruneMock).toHaveBeenCalledTimes(1);
+    const [passedGraph, passedFocusId, passedOptions] = pruneMock.mock.calls[0]!;
+    expect(passedGraph.nodes).toEqual(graphFixture.nodes);
+    expect(passedGraph.edges).toEqual(graphFixture.edges);
+    expect(passedFocusId).toBe("queue:h:q1");
+    expect(passedOptions).toEqual({ maxDepth: 3, direction: "both" });
+    // Precomputed token snapshots the exact input identities so the
+    // pipeline can invalidate on same-focus visibility/graph/depth flips.
+    expect(result.current.precomputed?.token.graph).toBe(graphFixture);
+    expect(result.current.precomputed?.token.focusNodeId).toBe("queue:h:q1");
+    expect(result.current.precomputed?.token.focusMaxDepth).toBe(3);
+  });
+
+  it("useFocusedNeighborhood — regression: OUT-OF-ORDER focus-result resolution never overwrites a newer focus target (task 53 stale-response protection)", async () => {
+    // The failure mode the review specifically called out: search-driven
+    // focus flips rapidly (queue A → queue B) while A's worker call is
+    // still in flight; B's call resolves FIRST (fast subgraph); A's
+    // resolves LATE (slow subgraph). The hook's cancelled-guard must
+    // reject A's late arrival so the on-screen focused view keeps pointing
+    // at B, not silently regress to the stale A subgraph.
+    let resolveA: ((r: PruneNeighborhoodResult) => void) | undefined;
+    let resolveB: ((r: PruneNeighborhoodResult) => void) | undefined;
+    const graphFixture: BuildGraphResult = {
+      nodes: [
+        { id: "queue:h:qA", kind: "queue", label: "qA", data: {} },
+        { id: "queue:h:qB", kind: "queue", label: "qB", data: {} },
+      ],
+      edges: [],
+      diagnostics: [],
+    };
+    const pruneMock = vi
+      .fn<
+        [BuildGraphResult, string, unknown?],
+        Promise<PruneNeighborhoodResult>
+      >()
+      .mockImplementationOnce(
+        () =>
+          new Promise<PruneNeighborhoodResult>((resolve) => {
+            resolveA = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<PruneNeighborhoodResult>((resolve) => {
+            resolveB = resolve;
+          }),
+      );
+    const client = mockClient({ pruneNeighborhood: pruneMock });
+    const stableVisibility = createEmptyVisibility();
+    const { result, rerender } = renderHook(
+      (props: { focusNodeId: string | undefined }) =>
+        useFocusedNeighborhood({
+          graph: graphFixture,
+          visibility: stableVisibility,
+          focusNodeId: props.focusNodeId,
+          focusMaxDepth: 3,
+          workerClient: client,
+        }),
+      { initialProps: { focusNodeId: undefined as string | undefined } },
+    );
+    // Focus A — first worker call in flight.
+    rerender({ focusNodeId: "queue:h:qA" });
+    await waitFor(() => {
+      expect(pruneMock).toHaveBeenCalledTimes(1);
+      expect(result.current.focusLoading).toBe(true);
+    });
+    // Rapid switch to B — second worker call in flight. Cancelled guard
+    // clears the stale focused state synchronously.
+    rerender({ focusNodeId: "queue:h:qB" });
+    await waitFor(() => {
+      expect(pruneMock).toHaveBeenCalledTimes(2);
+    });
+    expect(result.current.focused).toBeUndefined();
+    expect(result.current.focusLoading).toBe(true);
+    // Resolve B FIRST — the hook adopts B's subgraph.
+    await act(async () => {
+      resolveB?.({
+        nodes: [{ id: "queue:h:qB", kind: "queue", label: "qB", data: {} }],
+        edges: [],
+        diagnostics: [],
+        focusNodeId: "queue:h:qB",
+        truncated: false,
+        focusMissing: false,
+      });
+    });
+    await waitFor(() => {
+      expect(result.current.focused?.focusNodeId).toBe("queue:h:qB");
+      expect(result.current.focusLoading).toBe(false);
+    });
+    // Resolve A LATE — cancelled guard MUST reject it so the on-screen
+    // focused view keeps pointing at B, not silently regress to the stale
+    // A subgraph.
+    await act(async () => {
+      resolveA?.({
+        nodes: [{ id: "queue:h:qA", kind: "queue", label: "qA", data: {} }],
+        edges: [],
+        diagnostics: [],
+        focusNodeId: "queue:h:qA",
+        truncated: false,
+        focusMissing: false,
+      });
+      await Promise.resolve();
+    });
+    // Focused state MUST still be B — A's late arrival was rejected.
+    expect(result.current.focused?.focusNodeId).toBe("queue:h:qB");
+    expect(result.current.focused?.focusNodeId).not.toBe("queue:h:qA");
+  });
+
+  it("useFocusedNeighborhood — same focusNodeId + DIFFERENT visibility re-fires the worker AND emits a precomputed token bound to the NEW visibility (reviewer regression)", async () => {
+    // Reviewer's specific failure mode: precomputed accepted based only on
+    // `focusNodeId`. Prove the hook invalidates precomputed the moment
+    // visibility identity changes, refires the worker, and stamps the new
+    // response with a token pointing at the NEW visibility — so the
+    // pipeline's token check can reject any stale payload.
+    let resolveA: ((r: PruneNeighborhoodResult) => void) | undefined;
+    let resolveB: ((r: PruneNeighborhoodResult) => void) | undefined;
+    const graphFixture: BuildGraphResult = {
+      nodes: [
+        { id: "queue:h:q", kind: "queue", label: "q", data: {} },
+        { id: "exchange:h:x", kind: "exchange", label: "x", data: {} },
+      ],
+      edges: [
+        { id: "b:x->q", from: "exchange:h:x", to: "queue:h:q", kind: "binds", routingKey: "k" },
+      ],
+      diagnostics: [],
+    };
+    const pruneMock = vi
+      .fn<
+        [BuildGraphResult, string, unknown?],
+        Promise<PruneNeighborhoodResult>
+      >()
+      .mockImplementationOnce(
+        () =>
+          new Promise<PruneNeighborhoodResult>((resolve) => {
+            resolveA = resolve;
+          }),
+      )
+      .mockImplementationOnce(
+        () =>
+          new Promise<PruneNeighborhoodResult>((resolve) => {
+            resolveB = resolve;
+          }),
+      );
+    const client = mockClient({ pruneNeighborhood: pruneMock });
+    const visibilityA = createEmptyVisibility();
+    const visibilityB = hideNodes(createEmptyVisibility(), ["exchange:h:x"]);
+    const { result, rerender } = renderHook(
+      (props: { visibility: VisibilityState }) =>
+        useFocusedNeighborhood({
+          graph: graphFixture,
+          visibility: props.visibility,
+          focusNodeId: "queue:h:q",
+          focusMaxDepth: 3,
+          workerClient: client,
+        }),
+      { initialProps: { visibility: visibilityA } },
+    );
+    // First worker call fires against visibilityA.
+    await waitFor(() => {
+      expect(pruneMock).toHaveBeenCalledTimes(1);
+    });
+    // Resolve A — precomputed lands with a token bound to visibilityA.
+    await act(async () => {
+      resolveA?.({
+        nodes: graphFixture.nodes,
+        edges: graphFixture.edges,
+        diagnostics: [],
+        focusNodeId: "queue:h:q",
+        truncated: false,
+        focusMissing: false,
+      });
+    });
+    await waitFor(() => {
+      expect(result.current.precomputed?.token.visibility).toBe(visibilityA);
+    });
+    // Visibility flips to B — same focusNodeId. Hook MUST invalidate
+    // precomputed synchronously AND refire the worker.
+    rerender({ visibility: visibilityB });
+    expect(result.current.precomputed).toBeUndefined();
+    expect(result.current.focusLoading).toBe(true);
+    await waitFor(() => {
+      expect(pruneMock).toHaveBeenCalledTimes(2);
+    });
+    // Resolve B — precomputed lands with a token bound to visibilityB
+    // (never visibilityA).
+    await act(async () => {
+      resolveB?.({
+        nodes: [{ id: "queue:h:q", kind: "queue", label: "q", data: {} }],
+        edges: [],
+        diagnostics: [],
+        focusNodeId: "queue:h:q",
+        truncated: false,
+        focusMissing: false,
+      });
+    });
+    await waitFor(() => {
+      expect(result.current.precomputed?.token.visibility).toBe(visibilityB);
+      expect(result.current.precomputed?.token.visibility).not.toBe(visibilityA);
+    });
+  });
+
+  it("useFocusedNeighborhood — same focusNodeId + DIFFERENT focusMaxDepth re-fires the worker with the new depth (reviewer regression)", async () => {
+    const graphFixture: BuildGraphResult = {
+      nodes: [{ id: "queue:h:q", kind: "queue", label: "q", data: {} }],
+      edges: [],
+      diagnostics: [],
+    };
+    const pruneMock = vi.fn(async (_input, focusNodeId: string) => ({
+      nodes: [],
+      edges: [],
+      diagnostics: [],
+      focusNodeId,
+      truncated: false,
+      focusMissing: false,
+    }));
+    const client = mockClient({ pruneNeighborhood: pruneMock });
+    const visibility = createEmptyVisibility();
+    const { result, rerender } = renderHook(
+      (props: { depth: number }) =>
+        useFocusedNeighborhood({
+          graph: graphFixture,
+          visibility,
+          focusNodeId: "queue:h:q",
+          focusMaxDepth: props.depth,
+          workerClient: client,
+        }),
+      { initialProps: { depth: 3 } },
+    );
+    await waitFor(() => {
+      expect(result.current.precomputed?.token.focusMaxDepth).toBe(3);
+    });
+    rerender({ depth: 5 });
+    await waitFor(() => {
+      expect(pruneMock).toHaveBeenCalledTimes(2);
+      expect(result.current.precomputed?.token.focusMaxDepth).toBe(5);
+    });
+    const lastCall = pruneMock.mock.calls.at(-1)!;
+    expect(lastCall[2]).toEqual({ maxDepth: 5, direction: "both" });
+  });
+
+  it("useFocusedNeighborhood — worker rejection surfaces an actionable focusError with the thrown message AND clears focusLoading (reviewer regression: no permanent pending banner)", async () => {
+    const client = mockClient({
+      pruneNeighborhood: vi.fn(async () => {
+        throw new Error("worker exploded");
+      }),
+    });
+    const graphFixture: BuildGraphResult = {
+      nodes: [{ id: "queue:h:q", kind: "queue", label: "q", data: {} }],
+      edges: [],
+      diagnostics: [],
+    };
+    const stableVisibility = createEmptyVisibility();
+    const { result } = renderHook(() =>
+      useFocusedNeighborhood({
+        graph: graphFixture,
+        visibility: stableVisibility,
+        focusNodeId: "queue:h:q",
+        focusMaxDepth: 3,
+        workerClient: client,
+      }),
+    );
+    // After the worker rejects: focusLoading MUST fall to false (not stay
+    // true forever) AND focusError MUST expose the thrown message so the
+    // UI can render an actionable failure banner instead of an indefinite
+    // "computing…" state.
+    await waitFor(() => {
+      expect(result.current.focusLoading).toBe(false);
+      expect(result.current.focusError).toBe("worker exploded");
+    });
+    expect(result.current.focused).toBeUndefined();
+    expect(result.current.precomputed).toBeUndefined();
+  });
+
+  it("useFocusedNeighborhood — retryFocus refires the worker for the SAME focusNodeId after a rejection AND clears the error on success (reviewer recovery-path regression)", async () => {
+    let attempt = 0;
+    const pruneMock = vi.fn(async (_input, focusNodeId: string) => {
+      attempt += 1;
+      if (attempt === 1) throw new Error("transient worker failure");
+      return {
+        nodes: [{ id: focusNodeId, kind: "queue" as const, label: "q", data: {} }],
+        edges: [],
+        diagnostics: [],
+        focusNodeId,
+        truncated: false,
+        focusMissing: false,
+      };
+    });
+    const client = mockClient({ pruneNeighborhood: pruneMock });
+    const graphFixture: BuildGraphResult = {
+      nodes: [{ id: "queue:h:q", kind: "queue", label: "q", data: {} }],
+      edges: [],
+      diagnostics: [],
+    };
+    const stableVisibility = createEmptyVisibility();
+    const { result } = renderHook(() =>
+      useFocusedNeighborhood({
+        graph: graphFixture,
+        visibility: stableVisibility,
+        focusNodeId: "queue:h:q",
+        focusMaxDepth: 3,
+        workerClient: client,
+      }),
+    );
+    // First attempt rejects — error surfaces.
+    await waitFor(() => {
+      expect(result.current.focusError).toBe("transient worker failure");
+      expect(result.current.focusLoading).toBe(false);
+    });
+    // Operator hits Retry → hook re-fires worker for the SAME focus,
+    // clears error while pending, and adopts the second attempt's success
+    // subgraph. Precomputed lands with the current focus id.
+    await act(async () => {
+      result.current.retryFocus();
+    });
+    await waitFor(() => {
+      expect(pruneMock).toHaveBeenCalledTimes(2);
+      expect(result.current.focusError).toBeUndefined();
+      expect(result.current.focusLoading).toBe(false);
+      expect(result.current.precomputed?.result.focusNodeId).toBe("queue:h:q");
+    });
+  });
+
+  it("useFocusedNeighborhood — non-Error rejection (e.g. a plain string) still surfaces a human-readable focusError (defensive coverage)", async () => {
+    const client = mockClient({
+      pruneNeighborhood: vi.fn(async () => {
+        // eslint-disable-next-line @typescript-eslint/no-throw-literal
+        throw "postMessage aborted";
+      }),
+    });
+    const graphFixture: BuildGraphResult = {
+      nodes: [{ id: "queue:h:q", kind: "queue", label: "q", data: {} }],
+      edges: [],
+      diagnostics: [],
+    };
+    const stableVisibility = createEmptyVisibility();
+    const { result } = renderHook(() =>
+      useFocusedNeighborhood({
+        graph: graphFixture,
+        visibility: stableVisibility,
+        focusNodeId: "queue:h:q",
+        workerClient: client,
+      }),
+    );
+    await waitFor(() => {
+      expect(result.current.focusError).toBe("postMessage aborted");
+      expect(result.current.focusLoading).toBe(false);
+    });
+  });
+
+  it("useFocusedNeighborhood — clearing the focus target drops the previous subgraph (regression: stale focus never lingers)", async () => {
+    const client = mockClient();
+    const graphFixture: BuildGraphResult = {
+      nodes: [{ id: "queue:h:q", kind: "queue", label: "q", data: {} }],
+      edges: [],
+      diagnostics: [],
+    };
+    const stableVisibility = createEmptyVisibility();
+    const { result, rerender } = renderHook(
+      (props: { focusNodeId: string | undefined }) =>
+        useFocusedNeighborhood({
+          graph: graphFixture,
+          visibility: stableVisibility,
+          focusNodeId: props.focusNodeId,
+          workerClient: client,
+        }),
+      { initialProps: { focusNodeId: "queue:h:q" as string | undefined } },
+    );
+    await waitFor(() => {
+      expect(result.current.focused?.focusNodeId).toBe("queue:h:q");
+    });
+    rerender({ focusNodeId: undefined });
+    await waitFor(() => {
+      expect(result.current.focused).toBeUndefined();
+      expect(result.current.focusLoading).toBe(false);
+    });
   });
 
   it("recovers gracefully when the worker rejects buildGraph (falls back to empty graph, not crash)", async () => {

@@ -15,15 +15,25 @@ vi.mock("../../src/ui/components/TopologyGraphCanvas", () => ({
   TopologyGraphCanvas: (props: {
     selectedNodeId?: string;
     onSelectionChange?: (id: string | undefined) => void;
+    focusNodeId?: string;
+    onFocusChange?: (id: string | undefined) => void;
   }) => (
     <section data-testid="canvas-stub">
       <span data-testid="canvas-stub-selected">{props.selectedNodeId ?? ""}</span>
+      <span data-testid="canvas-stub-focused">{props.focusNodeId ?? ""}</span>
       <button
         type="button"
         data-testid="canvas-stub-clear"
         onClick={() => props.onSelectionChange?.(undefined)}
       >
         clear
+      </button>
+      <button
+        type="button"
+        data-testid="canvas-stub-clear-focus"
+        onClick={() => props.onFocusChange?.(undefined)}
+      >
+        clear focus
       </button>
     </section>
   ),
@@ -139,6 +149,54 @@ describe("App — EntitySearchBox → TopologyGraphCanvas selection wiring", () 
     expect(screen.getByTestId("canvas-stub-selected").textContent).toBe(
       "exchange:rabbit-a:/:orders.in",
     );
+  });
+
+  it("clicking a search result switches the canvas into FOCUSED MODE — sets focusNodeId in addition to selectedNodeId (task 53 review acceptance)", () => {
+    render(<App />);
+    fireEvent.click(screen.getByTestId("import-panel-stub"));
+    // Nothing focused before a pick.
+    expect(screen.getByTestId("canvas-stub-focused").textContent).toBe("");
+    fireEvent.change(screen.getByTestId("entity-search-query"), {
+      target: { value: "orders.q" },
+    });
+    fireEvent.click(
+      screen.getByTestId("entity-search-result-queue:rabbit-a:/:orders.q"),
+    );
+    // BOTH selection and focus land — the operator's intent when picking
+    // from a name-driven search is "walk THIS entity's flow," which is
+    // focused mode, not just a highlight in the full topology.
+    expect(screen.getByTestId("canvas-stub-selected").textContent).toBe(
+      "queue:rabbit-a:/:orders.q",
+    );
+    expect(screen.getByTestId("canvas-stub-focused").textContent).toBe(
+      "queue:rabbit-a:/:orders.q",
+    );
+    // Canvas-driven `Show full topology` clears focus without touching the
+    // highlight — user can keep inspecting the same entity in unfocused
+    // context.
+    fireEvent.click(screen.getByTestId("canvas-stub-clear-focus"));
+    expect(screen.getByTestId("canvas-stub-focused").textContent).toBe("");
+    expect(screen.getByTestId("canvas-stub-selected").textContent).toBe(
+      "queue:rabbit-a:/:orders.q",
+    );
+  });
+
+  it("re-importing invalidates the current selection AND focus so neither can linger against a freshly built graph", () => {
+    render(<App />);
+    fireEvent.click(screen.getByTestId("import-panel-stub"));
+    fireEvent.change(screen.getByTestId("entity-search-query"), {
+      target: { value: "orders.q" },
+    });
+    fireEvent.click(
+      screen.getByTestId("entity-search-result-queue:rabbit-a:/:orders.q"),
+    );
+    expect(screen.getByTestId("canvas-stub-focused").textContent).toBe(
+      "queue:rabbit-a:/:orders.q",
+    );
+    // Re-import: focus id must also be dropped, not only selection.
+    fireEvent.click(screen.getByTestId("import-panel-stub"));
+    expect(screen.getByTestId("canvas-stub-selected").textContent).toBe("");
+    expect(screen.getByTestId("canvas-stub-focused").textContent).toBe("");
   });
 
   it("re-importing invalidates the current selection so a stale node id from a previous import cannot linger", () => {

@@ -14,7 +14,11 @@ import {
 import type { BuildGraphResult } from "../../../src/core/graph/buildGraph";
 import type { GraphEdge, GraphNode } from "../../../src/core/model";
 import { toReactFlowElements } from "../../../src/ui/components/topologyGraphElements";
-import { composeFocusedTopology } from "../../../src/ui/components/topologyRenderPipeline";
+import {
+  composeFocusedTopology,
+  type PrecomputedFocused,
+} from "../../../src/ui/components/topologyRenderPipeline";
+import { pruneNeighborhood } from "../../../src/core/graph/pruneNeighborhood";
 
 /**
  * Integration coverage for TopologyGraphCanvas's data pipeline:
@@ -226,6 +230,7 @@ describe("TopologyGraphCanvas pipeline — focused mode composes with filters + 
       visibility: createEmptyVisibility(),
       focusNodeId: "queue:a:q1",
       focusMaxDepth: 32,
+      syncFallback: true,
     });
     expect(focused).toBeDefined();
     const ids = new Set(focused!.nodes.map((n) => n.id));
@@ -252,6 +257,7 @@ describe("TopologyGraphCanvas pipeline — focused mode composes with filters + 
       visibility: createEmptyVisibility(),
       focusNodeId: "queue:b:q2",
       focusMaxDepth: 32,
+      syncFallback: true,
     });
     expect(focused).toBeDefined();
     expect(focused!.focusMissing).toBe(true);
@@ -266,6 +272,7 @@ describe("TopologyGraphCanvas pipeline — focused mode composes with filters + 
       visibility: hideNodes(createEmptyVisibility(), ["exchange:a:x2"]),
       focusNodeId: "queue:a:q1",
       focusMaxDepth: 32,
+      syncFallback: true,
     });
     expect(focused).toBeDefined();
     const ids = new Set(focused!.nodes.map((n) => n.id));
@@ -290,6 +297,7 @@ describe("TopologyGraphCanvas pipeline — focused mode composes with filters + 
       visibility: hideNodes(createEmptyVisibility(), ["exchange:a:x1"]),
       focusNodeId: "queue:a:q1",
       focusMaxDepth: 32,
+      syncFallback: true,
     });
     const flow = toReactFlowElements(renderInput, { includeContains: false });
     const renderedIds = new Set(flow.nodes.map((n) => n.id));
@@ -410,6 +418,7 @@ describe("TopologyGraphCanvas pipeline — focused mode composes with filters + 
       visibility: createEmptyVisibility(),
       focusNodeId: "queue:a:q1",
       focusMaxDepth: 32,
+      syncFallback: true,
     });
     // Identity check: the render input is the focused-mode result, not the
     // pre-focus `visible` payload. If a future refactor accidentally hands
@@ -458,6 +467,7 @@ describe("TopologyGraphCanvas pipeline — shovel-chain end-to-end regression vi
       visibility: createEmptyVisibility(),
       focusNodeId: "queue:b:q2",
       focusMaxDepth: 32,
+      syncFallback: true,
     });
     expect(focused).toBeDefined();
     const ids = new Set(focused!.nodes.map((n) => n.id));
@@ -487,6 +497,7 @@ describe("TopologyGraphCanvas pipeline — shovel-chain end-to-end regression vi
       visibility: createEmptyVisibility(),
       focusNodeId: "exchange:a:x2",
       focusMaxDepth: 32,
+      syncFallback: true,
     });
     expect(focused).toBeDefined();
     const ids = new Set(focused!.nodes.map((n) => n.id));
@@ -513,6 +524,7 @@ describe("TopologyGraphCanvas pipeline — shovel-chain end-to-end regression vi
       visibility: createEmptyVisibility(),
       focusNodeId: "shovel:a:s1",
       focusMaxDepth: 32,
+      syncFallback: true,
     });
     expect(focused).toBeDefined();
     const ids = new Set(focused!.nodes.map((n) => n.id));
@@ -550,6 +562,7 @@ describe("TopologyGraphCanvas pipeline — shovel-chain end-to-end regression vi
       visibility: createEmptyVisibility(),
       focusNodeId: "exchange:a:x3",
       focusMaxDepth: 32,
+      syncFallback: true,
     });
     expect(focused).toBeDefined();
     const ids = new Set(focused!.nodes.map((n) => n.id));
@@ -574,6 +587,7 @@ describe("TopologyGraphCanvas pipeline — shovel-chain end-to-end regression vi
       visibility: createEmptyVisibility(),
       focusNodeId: "queue:b:q2",
       focusMaxDepth: 32,
+      syncFallback: true,
     });
     expect(focused.focused).toBeDefined();
     const focusedIds = new Set(focused.renderInput.nodes.map((n) => n.id));
@@ -602,6 +616,7 @@ describe("TopologyGraphCanvas pipeline — shovel-chain end-to-end regression vi
       visibility: createEmptyVisibility(),
       focusNodeId: "shovel:a:s1",
       focusMaxDepth: 1,
+      syncFallback: true,
     });
     expect(focused).toBeDefined();
     const ids = new Set(focused!.nodes.map((n) => n.id));
@@ -859,5 +874,171 @@ describe("TopologyGraphCanvas pipeline — BIDIRECTIONAL selection highlight com
         expect(h.nodeIds.has(edge!.to)).toBe(true);
       }
     }
+  });
+});
+
+/**
+ * Reviewer-requested regression suite: `composeFocusedTopology` MUST NOT
+ * accept a precomputed focused payload based on `focusNodeId` equality
+ * alone. When the focus target stays the same but ANY of the other
+ * pipeline inputs shifts — a visibility toggle, a filter that rebuilds
+ * `graph`, or a `focusMaxDepth` change — the precomputed payload is stale
+ * and the pipeline must enter `focusPending: true` (with an EMPTY focused
+ * subgraph so the caller renders a loading state) rather than surfacing
+ * hidden/filtered nodes or a wrong-depth clip for a frame.
+ *
+ * Also asserts the sibling contract: when `syncFallback` is OFF (the
+ * production default), a mismatched or absent precomputed result NEVER
+ * triggers a synchronous `pruneNeighborhood` on the main thread — the
+ * pipeline stays in the pending state so responsiveness for large graphs
+ * is preserved.
+ */
+describe("composeFocusedTopology — precomputed focused payload is invalidated on any input change (reviewer regression)", () => {
+  function buildPrecomputed(
+    graph: BuildGraphResult,
+    visibility: ReturnType<typeof createEmptyVisibility>,
+    focusNodeId: string,
+    focusMaxDepth: number | undefined,
+  ): PrecomputedFocused {
+    const visible = applyVisibility(graph, visibility);
+    const result = pruneNeighborhood(
+      { nodes: visible.nodes, edges: visible.edges, diagnostics: visible.diagnostics },
+      focusNodeId,
+      { maxDepth: focusMaxDepth, direction: "both" },
+    );
+    return { result, token: { graph, visibility, focusNodeId, focusMaxDepth } };
+  }
+
+  it("same focusNodeId + DIFFERENT visibility → precomputed rejected, pipeline stays pending, no stale/hidden nodes leak", () => {
+    // Prime the precomputed payload with visibility A (empty deny-list).
+    const graph = applyGraphFilters(pipelineFixture());
+    const visibilityA = createEmptyVisibility();
+    const primedFocus = buildPrecomputed(graph, visibilityA, "queue:a:q1", 32);
+    // Precomputed payload includes the full x1→x2→x3→q1 chain because it
+    // was computed against visibility A.
+    const primedIds = new Set(primedFocus.result.nodes.map((n) => n.id));
+    expect(primedIds.has("exchange:a:x1")).toBe(true);
+    // NOW the operator hides `exchange:a:x1` — visibility identity flips
+    // to visibilityB. Pipeline receives the SAME focusNodeId but a DIFFERENT
+    // visibility reference; the precomputed payload's token no longer
+    // matches, so it MUST be rejected.
+    const visibilityB = hideNodes(createEmptyVisibility(), ["exchange:a:x1"]);
+    const composition = composeFocusedTopology({
+      graph,
+      visibility: visibilityB,
+      focusNodeId: "queue:a:q1",
+      focusMaxDepth: 32,
+      precomputedFocused: primedFocus,
+      // syncFallback OFF — production canvas default. Pipeline must NOT
+      // fall back to a main-thread `pruneNeighborhood`.
+    });
+    expect(composition.focusPending).toBe(true);
+    // The hidden `exchange:a:x1` did NOT leak through the stale
+    // precomputed payload — the focused render is empty pending the next
+    // worker roundtrip.
+    expect(composition.focused).toBeDefined();
+    expect(composition.focused!.nodes).toEqual([]);
+    expect(composition.focused!.edges).toEqual([]);
+    expect(composition.renderInput.nodes).toEqual([]);
+  });
+
+  it("same focusNodeId + DIFFERENT graph identity (filter rebuild) → precomputed rejected, pipeline stays pending", () => {
+    // Precomputed payload for graph A (host:a survivors only).
+    const graphA = applyGraphFilters(pipelineFixture(), {
+      hostIds: new Set(["host:a"]),
+    });
+    const visibility = createEmptyVisibility();
+    const primedFocus = buildPrecomputed(graphA, visibility, "queue:a:q1", 32);
+    // Operator relaxes the filter → applyGraphFilters produces a fresh
+    // BuildGraphResult (graphB) with the same content-shape but a new
+    // object identity. Pipeline receives graphB; precomputed's token still
+    // points at graphA → rejected.
+    const graphB = applyGraphFilters(pipelineFixture(), {
+      hostIds: new Set(["host:a"]),
+    });
+    expect(graphB).not.toBe(graphA);
+    const composition = composeFocusedTopology({
+      graph: graphB,
+      visibility,
+      focusNodeId: "queue:a:q1",
+      focusMaxDepth: 32,
+      precomputedFocused: primedFocus,
+    });
+    expect(composition.focusPending).toBe(true);
+    expect(composition.focused!.nodes).toEqual([]);
+    expect(composition.renderInput.nodes).toEqual([]);
+  });
+
+  it("same focusNodeId + DIFFERENT focusMaxDepth → precomputed rejected (avoids rendering the wrong-depth clip for a frame)", () => {
+    const graph = applyGraphFilters(pipelineFixture());
+    const visibility = createEmptyVisibility();
+    // Precomputed payload at depth 32 (walks the entire x1 chain).
+    const primedFocus = buildPrecomputed(graph, visibility, "queue:a:q1", 32);
+    const primedIds = new Set(primedFocus.result.nodes.map((n) => n.id));
+    expect(primedIds.has("exchange:a:x1")).toBe(true);
+    // Operator narrows depth to 1 → pipeline receives depth 1 but the
+    // precomputed payload is still the depth-32 clip. Rejected.
+    const composition = composeFocusedTopology({
+      graph,
+      visibility,
+      focusNodeId: "queue:a:q1",
+      focusMaxDepth: 1,
+      precomputedFocused: primedFocus,
+    });
+    expect(composition.focusPending).toBe(true);
+    expect(composition.focused!.nodes).toEqual([]);
+  });
+
+  it("same focusNodeId + MATCHING token (all four inputs identical by identity) → precomputed accepted, focused populated, focusPending false", () => {
+    const graph = applyGraphFilters(pipelineFixture());
+    const visibility = createEmptyVisibility();
+    const primedFocus = buildPrecomputed(graph, visibility, "queue:a:q1", 32);
+    const composition = composeFocusedTopology({
+      graph,
+      visibility,
+      focusNodeId: "queue:a:q1",
+      focusMaxDepth: 32,
+      precomputedFocused: primedFocus,
+    });
+    expect(composition.focusPending).toBe(false);
+    expect(composition.focused).toBe(primedFocus.result);
+    expect(composition.renderInput).toBe(primedFocus.result);
+  });
+
+  it("no precomputed at all → pipeline stays pending (does NOT invoke synchronous pruneNeighborhood on the main thread)", () => {
+    const graph = applyGraphFilters(pipelineFixture());
+    const composition = composeFocusedTopology({
+      graph,
+      visibility: createEmptyVisibility(),
+      focusNodeId: "queue:a:q1",
+      focusMaxDepth: 32,
+      // No precomputedFocused; syncFallback OFF.
+    });
+    expect(composition.focusPending).toBe(true);
+    expect(composition.focused).toBeDefined();
+    expect(composition.focused!.focusNodeId).toBe("queue:a:q1");
+    expect(composition.focused!.nodes).toEqual([]);
+    expect(composition.focused!.edges).toEqual([]);
+    // The renderInput MUST be the empty focused payload — never the
+    // pre-focus visible graph. Rendering the visible graph while focus
+    // is "on but pending" would surface every node the operator did NOT
+    // ask to focus on, which is the exact stale-render failure the
+    // reviewer flagged.
+    expect(composition.renderInput).toBe(composition.focused);
+  });
+
+  it("syncFallback opt-in still works for legacy tests: no precomputed → synchronous pruneNeighborhood runs (opt-in path)", () => {
+    const graph = applyGraphFilters(pipelineFixture());
+    const composition = composeFocusedTopology({
+      graph,
+      visibility: createEmptyVisibility(),
+      focusNodeId: "queue:a:q1",
+      focusMaxDepth: 32,
+      syncFallback: true,
+    });
+    expect(composition.focusPending).toBe(false);
+    expect(composition.focused).toBeDefined();
+    const ids = new Set(composition.focused!.nodes.map((n) => n.id));
+    expect(ids.has("exchange:a:x1")).toBe(true);
   });
 });

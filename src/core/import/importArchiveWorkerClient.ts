@@ -10,6 +10,11 @@ import {
   type UpstreamTraversalResult,
 } from "../graph/traversal";
 import {
+  pruneNeighborhood,
+  type PruneNeighborhoodOptions,
+  type PruneNeighborhoodResult,
+} from "../graph/pruneNeighborhood";
+import {
   importTopologyArchive,
   importTopologyBatch,
   type BatchImportInput,
@@ -75,6 +80,19 @@ export interface ImportArchiveWorkerClient {
     targetNodeId: string,
     options?: UpstreamTraversalOptions,
   ): Promise<BidirectionalTraversalResult>;
+  /**
+   * Run the focused-mode neighborhood clip on the worker instead of the main
+   * thread so a large graph with a deep focus radius doesn't stall the UI
+   * frame. The result is a fresh `PruneNeighborhoodResult` (nodes + edges +
+   * focus metadata) ready for `toReactFlowElements`. The caller pairs this
+   * with a cancelled-flag guarded effect to protect against out-of-order
+   * responses when the focus target changes rapidly.
+   */
+  pruneNeighborhood(
+    input: BuildGraphResult,
+    focusNodeId: string,
+    options?: PruneNeighborhoodOptions,
+  ): Promise<PruneNeighborhoodResult>;
   /** Tear down the worker; subsequent calls will reject immediately. */
   terminate(): void;
 }
@@ -312,6 +330,23 @@ export function createImportArchiveWorkerClient(
       }
       return response.result;
     },
+    async pruneNeighborhood(input, focusNodeId, pruneOptions) {
+      const id = nextId++;
+      const response = await submitRaw({
+        id,
+        kind: "prune-neighborhood",
+        input,
+        focusNodeId,
+        options: pruneOptions,
+      });
+      if (response.status === "error") throw new Error(response.message);
+      if (response.kind !== "prune-neighborhood") {
+        throw new Error(
+          `Worker returned unexpected response kind '${response.kind}' for prune-neighborhood`,
+        );
+      }
+      return response.result;
+    },
     terminate() {
       if (terminated) return;
       terminated = true;
@@ -396,6 +431,8 @@ export function createMainThreadClient(): ImportArchiveWorkerClient {
       guard(() => upstreamForExchange(input, target, options)),
     bidirectionalForNode: (input, target, options) =>
       guard(() => bidirectionalForNode(input, target, options)),
+    pruneNeighborhood: (input, focus, options) =>
+      guard(() => pruneNeighborhood(input, focus, options)),
     terminate: () => {
       terminated = true;
     },
