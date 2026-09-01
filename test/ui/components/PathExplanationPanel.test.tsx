@@ -383,4 +383,42 @@ describe("PathExplanationPanel", () => {
       screen.getByTestId("path-explanation-downstream-item-0").textContent,
     ).toMatch(/binds/);
   });
+
+  it("renders a per-step 'Applies when' condition line so the chain never implies every message follows the route", () => {
+    // Task 40 acceptance: each chain step must surface binding/routing
+    // restrictions and conditional semantics. This regression pins the
+    // condition annotation into the DOM so a future panel refactor that
+    // drops the second <div> silently regresses the acceptance criterion.
+    const traversal: UpstreamTraversalResult = {
+      targetNodeId: "queue:a:q1",
+      reachableAncestorIds: ["exchange:a:x1"],
+      paths: [
+        {
+          sourceNodeId: "exchange:a:x1",
+          steps: [
+            {
+              edgeId: "b:x1->q1",
+              fromNodeId: "exchange:a:x1",
+              toNodeId: "queue:a:q1",
+              kind: "binds",
+              routingKey: "orders.*",
+            },
+          ],
+        },
+      ],
+      truncated: false,
+      visitedCycles: [],
+    };
+    render(<PathExplanationPanel nodes={nodes} traversal={traversal} />);
+    const condition = screen.getByTestId(
+      "path-explanation-upstream-item-0-step-0-condition",
+    );
+    // Prefix is the hedge signal — operators read "Applies when: …" and
+    // understand the route is conditional, not guaranteed for every msg.
+    expect(condition.textContent).toMatch(/^Applies when:/);
+    // Topic exchange in the fixture → wording must mention topic pattern
+    // and the specific routing key so the operator sees WHY it's hedged.
+    expect(condition.textContent).toMatch(/topic pattern/);
+    expect(condition.textContent).toContain("'orders.*'");
+  });
 });

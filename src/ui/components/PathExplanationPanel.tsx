@@ -209,7 +209,13 @@ function PathSection({
                     style={stepStyle}
                     data-testid={`path-explanation-${direction}-item-${index}-step-${stepIndex}`}
                   >
-                    {step.sentence}
+                    <div>{step.sentence}</div>
+                    <div
+                      style={stepConditionStyle}
+                      data-testid={`path-explanation-${direction}-item-${index}-step-${stepIndex}-condition`}
+                    >
+                      Applies when: {step.condition}
+                    </div>
                   </li>
                 ))}
               </ol>
@@ -322,6 +328,13 @@ const stepListStyle: React.CSSProperties = {
 
 const stepStyle: React.CSSProperties = {
   margin: "0.1rem 0",
+};
+
+const stepConditionStyle: React.CSSProperties = {
+  marginTop: "0.15rem",
+  color: "#555",
+  fontSize: "0.78rem",
+  fontStyle: "italic",
 };
 
 const emptyStepStyle: React.CSSProperties = {

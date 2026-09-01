@@ -15,6 +15,23 @@ export interface ExplainedStep {
   label?: string;
   /** One-line, human-readable sentence describing what this hop does. */
   sentence: string;
+  /**
+   * Per-step conditional-semantics annotation — describes WHEN messages
+   * actually traverse this hop (topic-pattern match, direct-key equality,
+   * headers criteria, alternate-exchange fallback, dead-letter trigger,
+   * shovel/federation reliability, unresolved external endpoints).
+   *
+   * The chain view surfaces this text so the operator understands the
+   * route is conditional; every hedged sentence prevents the UI from
+   * implying "every message follows this route" — the acceptance
+   * requirement from the flow-explorer task.
+   *
+   * Always populated (never undefined) so downstream renderers can rely
+   * on it existing. The wording is deliberately conservative: it flags
+   * the constraint without asserting message-count or delivery
+   * guarantees the visualizer cannot verify statically.
+   */
+  condition: string;
 }
 
 export interface PathExplanation {
@@ -50,6 +67,7 @@ export function explainUpstreamPath(
     routingKey: step.routingKey,
     label: step.label,
     sentence: sentenceForStep(step, nodeById),
+    condition: conditionForStep(step, nodeById),
   }));
 
   return {
@@ -81,6 +99,7 @@ export function explainDownstreamPath(
     routingKey: step.routingKey,
     label: step.label,
     sentence: sentenceForStep(step, nodeById),
+    condition: conditionForStep(step, nodeById),
   }));
 
   return {
@@ -134,6 +153,91 @@ function sentenceForStep(
       return `${from} → ${to} (${sanitizeInline(String(unknown))}).`;
     }
   }
+}
+
+/**
+ * Per-step conditional-semantics annotation. Explicitly hedges each hop
+ * so the chain view never implies every published message actually
+ * traverses the route — the visualizer knows the STRUCTURE, not the
+ * live routing outcome.
+ */
+function conditionForStep(
+  step: UpstreamStep | DownstreamStep,
+  nodeById: Map<string, GraphNode>,
+): string {
+  switch (step.kind) {
+    case "binds":
+    case "routes": {
+      const fromNode = nodeById.get(step.fromNodeId);
+      const exchangeType = extractExchangeType(fromNode);
+      const key = step.routingKey ?? "";
+      return describeBindingCondition(exchangeType, key);
+    }
+    case "alternate-exchange":
+      return "Only when the source exchange itself has no matching binding for a published message — the check happens at the source exchange only, so a matching exchange-to-exchange binding still counts as routed even if nothing downstream reaches a queue; the alternate is the fallback route for messages the source cannot route, not the primary one.";
+    case "dead-letter":
+      return "Only when a message is rejected (basic.reject / basic.nack) without requeue, expires via per-message or queue TTL, is dropped for exceeding the queue length or byte limit, or (on quorum queues) exceeds the configured delivery-limit; dead-lettering is a failure-path consequence, not a routing decision the publisher controls.";
+    case "shovels": {
+      const named = step.label ? ` '${sanitizeInline(step.label)}'` : "";
+      return `Delivery depends on the shovel${named} being running, its ack-mode, and the destination staying reachable — a paused, misconfigured, or unreachable shovel silently blocks this hop.`;
+    }
+    case "federates": {
+      const named = step.label ? ` '${sanitizeInline(step.label)}'` : "";
+      return `Delivery depends on the federation link${named} being active and the upstream/downstream broker connection staying healthy — a broken link silently pauses this hop until reconnection succeeds.`;
+    }
+    case "contains":
+      return "Structural containment only — no message flow crosses this edge.";
+    default:
+      return "Routing outcome depends on the runtime state of this edge kind, which the topology visualizer cannot determine from static definitions.";
+  }
+}
+
+/**
+ * Produces the "only when …" clause for a `binds`/`routes` step based on
+ * the source exchange's declared type. Falls back to a generic
+ * "matches this binding" phrasing for unknown or missing types so the
+ * chain view still surfaces a conditional annotation instead of
+ * omitting one.
+ */
+function describeBindingCondition(
+  exchangeType: string | undefined,
+  routingKey: string,
+): string {
+  const key = sanitizeInline(routingKey);
+  const keyPhrase = key.length > 0 ? `'${key}'` : "(empty routing key)";
+  switch ((exchangeType ?? "").toLowerCase()) {
+    case "topic":
+      return `Only messages whose routing key matches the topic pattern ${keyPhrase} follow this binding; other routing keys are not delivered via this hop.`;
+    case "direct":
+      return `Only messages whose routing key equals ${keyPhrase} exactly follow this binding; any other routing key skips this hop.`;
+    case "fanout":
+      return "Every message published to the source fanout exchange follows this binding regardless of routing key.";
+    case "headers":
+      return "Only messages whose headers satisfy this binding's x-match arguments follow this hop; the routing key is ignored for headers exchanges.";
+    case "consistent-hash":
+    case "x-consistent-hash":
+      return `Consistent-hash exchange: the destination is chosen by hashing each message's own routing key (or configured header) and mapping that hash across all bindings' weighted shards; this binding's routing key ${keyPhrase} declares its integer WEIGHT (share of the hash ring), not an equality/pattern check on message routing keys.`;
+    case "x-random":
+      return `The source x-random exchange picks one bound destination per message; this binding is reached only when the random draw selects it, regardless of routing key ${keyPhrase}.`;
+    case "x-delayed-message":
+      return `Only messages whose routing key matches the delegated exchange type's rules follow this binding, and only after the per-message x-delay header (in ms) elapses; messages without an x-delay header are delivered immediately, and the routing key ${keyPhrase} applies according to the wrapped exchange type.`;
+    case "":
+    case undefined:
+      return `Only messages that match this binding's routing/headers criteria follow this hop; the source exchange type is unknown so the visualizer cannot narrow the condition further (routing key: ${keyPhrase}).`;
+    default:
+      return `Only messages that match this binding's criteria for the source exchange type '${sanitizeInline(exchangeType!)}' follow this hop (routing key: ${keyPhrase}).`;
+  }
+}
+
+interface ExchangeTypeBearing {
+  type?: string;
+}
+
+function extractExchangeType(node: GraphNode | undefined): string | undefined {
+  if (!node || node.kind !== "exchange") return undefined;
+  const data = node.data as ExchangeTypeBearing | undefined;
+  const type = data?.type;
+  return typeof type === "string" ? type : undefined;
 }
 
 function formatRoutingKey(key: string | undefined): string {
