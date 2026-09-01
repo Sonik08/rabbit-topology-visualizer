@@ -131,6 +131,7 @@ export function PathExplanationPanel({
           direction="upstream"
           explanations={upstreamExplanations}
           truncated={traversal?.truncated === true}
+          cycleBoundaryCount={traversal?.visitedCycles.length ?? 0}
           cap={cap}
         />
       )}
@@ -140,6 +141,7 @@ export function PathExplanationPanel({
           direction="downstream"
           explanations={downstreamExplanations}
           truncated={downstream?.truncated === true}
+          cycleBoundaryCount={downstream?.visitedCycles.length ?? 0}
           cap={cap}
         />
       )}
@@ -152,6 +154,16 @@ interface PathSectionProps {
   direction: "upstream" | "downstream";
   explanations: PathExplanation[];
   truncated: boolean;
+  /**
+   * Count of nodes the traversal re-encountered — either a real ancestry
+   * cycle or a diamond (a node reachable via multiple non-cycle branches
+   * whose first BFS visit already claimed the shortest path). We use
+   * deliberately hedged wording in the badge because the traversal
+   * result does not currently separate the two cases; task 40 only
+   * requires that cycles are *clearly reported*, not that diamonds are
+   * hidden.
+   */
+  cycleBoundaryCount: number;
   cap: number;
 }
 
@@ -160,6 +172,7 @@ function PathSection({
   direction,
   explanations,
   truncated,
+  cycleBoundaryCount,
   cap,
 }: PathSectionProps): JSX.Element {
   const shown = explanations.slice(0, cap);
@@ -184,6 +197,9 @@ function PathSection({
           {truncated ? " · truncated at max depth" : ""}
           {unresolvedCount > 0
             ? ` · ${unresolvedCount} of ${explanations.length} traverse${unresolvedCount === 1 ? "s" : ""} an unresolved external endpoint`
+            : ""}
+          {cycleBoundaryCount > 0
+            ? ` · cycle or repeat-visit boundary at ${cycleBoundaryCount} node${cycleBoundaryCount === 1 ? "" : "s"}`
             : ""}
         </span>
       </header>

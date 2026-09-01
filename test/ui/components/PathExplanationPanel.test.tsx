@@ -662,4 +662,96 @@ describe("PathExplanationPanel", () => {
     // Singular verb-form ("traverses") must not appear when count > 1.
     expect(count.textContent).not.toMatch(/traverses an unresolved/);
   });
+
+  it("surfaces a section-level cycle-or-repeat-visit indicator when traversal.visitedCycles is non-empty AND paths exist", () => {
+    // Task 40 acceptance: "clearly report cycles". The existing
+    // 'Reachable through a closed cycle' hint only fires when there
+    // are NO reachable paths at all — a target with SOME acyclic paths
+    // plus SOME cycle-terminated branches previously showed no signal
+    // that cycles were detected. This pins the section-level count in
+    // the DOM so a future regression that drops the wiring fails here.
+    const traversal: UpstreamTraversalResult = {
+      targetNodeId: "queue:a:q1",
+      reachableAncestorIds: ["exchange:a:x1", "exchange:a:x2"],
+      paths: [
+        {
+          sourceNodeId: "exchange:a:x1",
+          steps: [
+            {
+              edgeId: "b:x1->q1",
+              fromNodeId: "exchange:a:x1",
+              toNodeId: "queue:a:q1",
+              kind: "binds",
+              routingKey: "a",
+            },
+          ],
+        },
+      ],
+      truncated: false,
+      // Two boundary nodes (real cycle + diamond, hedged as a single
+      // count because the traversal doesn't distinguish them).
+      visitedCycles: ["exchange:a:cycle-a", "exchange:a:cycle-b"],
+    };
+    render(<PathExplanationPanel nodes={nodes} traversal={traversal} />);
+    const count = screen.getByTestId("path-explanation-upstream-count");
+    expect(count.textContent).toMatch(
+      /cycle or repeat-visit boundary at 2 nodes/,
+    );
+  });
+
+  it("uses SINGULAR 'node' in the cycle indicator when exactly one boundary is reported", () => {
+    const traversal: UpstreamTraversalResult = {
+      targetNodeId: "queue:a:q1",
+      reachableAncestorIds: ["exchange:a:x1"],
+      paths: [
+        {
+          sourceNodeId: "exchange:a:x1",
+          steps: [
+            {
+              edgeId: "b:x1->q1",
+              fromNodeId: "exchange:a:x1",
+              toNodeId: "queue:a:q1",
+              kind: "binds",
+              routingKey: "a",
+            },
+          ],
+        },
+      ],
+      truncated: false,
+      visitedCycles: ["exchange:a:cycle-only"],
+    };
+    render(<PathExplanationPanel nodes={nodes} traversal={traversal} />);
+    const count = screen.getByTestId("path-explanation-upstream-count");
+    expect(count.textContent).toMatch(
+      /cycle or repeat-visit boundary at 1 node/,
+    );
+    // Plural must not fire on a single-boundary count.
+    expect(count.textContent).not.toMatch(/boundary at 1 nodes/);
+  });
+
+  it("does NOT render the cycle indicator when visitedCycles is empty", () => {
+    const traversal: UpstreamTraversalResult = {
+      targetNodeId: "queue:a:q1",
+      reachableAncestorIds: ["exchange:a:x1"],
+      paths: [
+        {
+          sourceNodeId: "exchange:a:x1",
+          steps: [
+            {
+              edgeId: "b:x1->q1",
+              fromNodeId: "exchange:a:x1",
+              toNodeId: "queue:a:q1",
+              kind: "binds",
+              routingKey: "a",
+            },
+          ],
+        },
+      ],
+      truncated: false,
+      visitedCycles: [],
+    };
+    render(<PathExplanationPanel nodes={nodes} traversal={traversal} />);
+    const count = screen.getByTestId("path-explanation-upstream-count");
+    expect(count.textContent).not.toMatch(/cycle or repeat-visit/);
+  });
 });
