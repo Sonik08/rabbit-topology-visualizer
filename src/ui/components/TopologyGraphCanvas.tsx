@@ -268,14 +268,24 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
   const selectionSummary = useMemo(() => {
     if (!selectedNodeId) return undefined;
     if (!selectedNode) return `Selected: ${selectedNodeId} (not in graph)`;
-    if (selectedNode.kind !== "queue" && selectedNode.kind !== "exchange") {
-      return `Selected ${selectedNode.kind}: ${selectedNode.label} — upstream highlight only supports queues and exchanges.`;
+    if (
+      selectedNode.kind !== "queue" &&
+      selectedNode.kind !== "exchange" &&
+      selectedNode.kind !== "shovel" &&
+      selectedNode.kind !== "federation"
+    ) {
+      return `Selected ${selectedNode.kind}: ${selectedNode.label} — bidirectional highlight only supports queues, exchanges, shovels, and federation links.`;
     }
-    const ancestorCount = highlight.nodeIds.size > 0 ? highlight.nodeIds.size - 1 : 0;
-    const truncated = highlight.traversal?.truncated ? " (truncated at max depth)" : "";
-    return `Upstream of ${selectedNode.kind} '${selectedNode.label}': ${ancestorCount} ancestor${
-      ancestorCount === 1 ? "" : "s"
-    }, ${highlight.edgeIds.size} edge${highlight.edgeIds.size === 1 ? "" : "s"}${truncated}.`;
+    const incoming = highlight.incomingCount;
+    const outgoing = highlight.outgoingCount;
+    const truncated = highlight.truncated ? " (truncated at max depth)" : "";
+    return `Flow through ${selectedNode.kind} '${selectedNode.label}': ${incoming} incoming (upstream) ${
+      incoming === 1 ? "ancestor" : "ancestors"
+    } · ${outgoing} outgoing (downstream) ${
+      outgoing === 1 ? "descendant" : "descendants"
+    } · ${highlight.edgeIds.size} edge${
+      highlight.edgeIds.size === 1 ? "" : "s"
+    }${truncated}.`;
   }, [selectedNodeId, selectedNode, highlight]);
 
   return (
@@ -390,7 +400,11 @@ export function TopologyGraphCanvas(props: TopologyGraphCanvasProps): JSX.Elemen
         </ReactFlow>
       </div>
       <EntityDetailsPanel node={selectedNode} />
-      <PathExplanationPanel traversal={highlight.traversal} nodes={graph.nodes} />
+      <PathExplanationPanel
+        traversal={highlight.upstream}
+        downstream={highlight.downstream}
+        nodes={graph.nodes}
+      />
     </section>
   );
 }

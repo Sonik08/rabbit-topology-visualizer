@@ -1,8 +1,10 @@
 import type { BuildGraphInput, BuildGraphResult } from "../graph/buildGraph";
 import { buildGraph } from "../graph/buildGraph";
 import {
+  bidirectionalForNode,
   upstreamForExchange,
   upstreamForQueue,
+  type BidirectionalTraversalResult,
   type UpstreamGraphInput,
   type UpstreamTraversalOptions,
   type UpstreamTraversalResult,
@@ -61,6 +63,18 @@ export interface ImportArchiveWorkerClient {
     targetExchangeId: string,
     options?: UpstreamTraversalOptions,
   ): Promise<UpstreamTraversalResult>;
+  /**
+   * Run a bidirectional (upstream + downstream) traversal from a
+   * queue / exchange / shovel / federation target. Backing store for the
+   * selection highlight — computing both directions in a single worker
+   * hop avoids two round-trips per selection and lets the client atomically
+   * cancel one bidirectional in-flight response instead of racing two.
+   */
+  bidirectionalForNode(
+    input: UpstreamGraphInput,
+    targetNodeId: string,
+    options?: UpstreamTraversalOptions,
+  ): Promise<BidirectionalTraversalResult>;
   /** Tear down the worker; subsequent calls will reject immediately. */
   terminate(): void;
 }
@@ -281,6 +295,23 @@ export function createImportArchiveWorkerClient(
       }
       return response.result;
     },
+    async bidirectionalForNode(input, targetNodeId, traversalOptions) {
+      const id = nextId++;
+      const response = await submitRaw({
+        id,
+        kind: "bidirectional-for-node",
+        input,
+        targetNodeId,
+        options: traversalOptions,
+      });
+      if (response.status === "error") throw new Error(response.message);
+      if (response.kind !== "bidirectional-for-node") {
+        throw new Error(
+          `Worker returned unexpected response kind '${response.kind}' for bidirectional-for-node`,
+        );
+      }
+      return response.result;
+    },
     terminate() {
       if (terminated) return;
       terminated = true;
@@ -363,6 +394,8 @@ export function createMainThreadClient(): ImportArchiveWorkerClient {
       guard(() => upstreamForQueue(input, target, options)),
     upstreamForExchange: (input, target, options) =>
       guard(() => upstreamForExchange(input, target, options)),
+    bidirectionalForNode: (input, target, options) =>
+      guard(() => bidirectionalForNode(input, target, options)),
     terminate: () => {
       terminated = true;
     },

@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { applyGraphFilters } from "../../../src/core/graph/filterGraph";
-import { computeUpstreamHighlight } from "../../../src/core/graph/upstreamHighlight";
+import {
+  computeBidirectionalHighlight,
+  computeUpstreamHighlight,
+} from "../../../src/core/graph/upstreamHighlight";
 import {
   applyVisibility,
   createEmptyVisibility,
@@ -660,5 +663,201 @@ describe("TopologyGraphCanvas pipeline — bulk visibility hide layered on broad
     const visibleIds = new Set(out.nodes.map((n) => n.id));
     expect(visibleIds.has("queue:a:q1")).toBe(true);
     expect(visibleIds.has("exchange:a:x3")).toBe(false);
+  });
+});
+
+describe("TopologyGraphCanvas pipeline — BIDIRECTIONAL selection highlight composes with filters + visibility + isolation (task 58 canvas-pipeline regression)", () => {
+  /**
+   * Fixture — the exact task-58 exemplar (`exchange → exchange → shovel →
+   * exchange → queue`) with two additions used by the composition tests:
+   *   - a downstream fan-out (`queue:b:q2`) that survives the shovel,
+   *   - a completely unrelated pair (`exchange:a:noise → queue:a:noise`)
+   *     that must NEVER appear in the highlight regardless of pipeline
+   *     stage, so the "exclude unrelated edges" contract is observable
+   *     at every composition step.
+   */
+  function bidirectionalCanvasFixture(): BuildGraphResult {
+    const base = shovelChainFixture();
+    base.nodes.push(
+      { id: "exchange:a:noise", kind: "exchange", label: "noise", data: { hostId: "host:a", vhostId: "vhost:a:/", type: "topic" } },
+      { id: "queue:a:noise", kind: "queue", label: "noise", data: { hostId: "host:a", vhostId: "vhost:a:/" } },
+    );
+    base.edges.push(
+      { id: "c:vhost-a->noise-x", from: "vhost:a:/", to: "exchange:a:noise", kind: "contains" },
+      { id: "c:vhost-a->noise-q", from: "vhost:a:/", to: "queue:a:noise", kind: "contains" },
+      { id: "b:noise", from: "exchange:a:noise", to: "queue:a:noise", kind: "binds", routingKey: "n" },
+    );
+    return base;
+  }
+
+  it("full shovel-chain end-to-end: selecting the shovel highlights every chain node upstream (x2, x1) AND downstream (x3, q1, q2) — the task-58 canonical example", () => {
+    const graph = applyGraphFilters(bidirectionalCanvasFixture());
+    const highlight = computeBidirectionalHighlight(
+      { nodes: graph.nodes, edges: graph.edges },
+      "shovel:a:s1",
+    );
+    // Selecting the shovel walks upstream through its inbound `shovels`
+    // edge and every exchange-to-exchange binding chain, then downstream
+    // through its outbound `shovels` edge. queue:a:q1 is downstream of
+    // exchange:a:x3 but NOT downstream of the shovel — it belongs to a
+    // different branch and must NOT be highlighted from a shovel selection.
+    for (const id of [
+      "exchange:a:x1",
+      "exchange:a:x2",
+      "exchange:a:x3",
+      "shovel:a:s1",
+      "queue:b:q2",
+    ]) {
+      expect(highlight.nodeIds.has(id)).toBe(true);
+    }
+    expect(highlight.nodeIds.has("queue:a:q1")).toBe(false);
+    // Every routing edge on the shovel-anchored chain participates.
+    for (const id of [
+      "b:x1->x2",
+      "b:x2->x3",
+      "s:x3->s1",
+      "s:s1->q2",
+    ]) {
+      expect(highlight.edgeIds.has(id)).toBe(true);
+    }
+    // Sibling branch edge (x3 → q1) is NOT on the shovel's own chain and
+    // MUST NOT be highlighted from a shovel selection.
+    expect(highlight.edgeIds.has("b:x3->q1")).toBe(false);
+    expect(highlight.incomingCount).toBe(3); // x3, x2, x1 (all upstream of the shovel)
+    expect(highlight.outgoingCount).toBe(1); // queue:b:q2 (shovel destination)
+  });
+
+  it("unrelated `exchange:a:noise → queue:a:noise` pair is NEVER highlighted — proves the traversal walks only reachable routing edges from the focus node, and never bleeds into disconnected sub-graphs", () => {
+    const graph = applyGraphFilters(bidirectionalCanvasFixture());
+    // Try every chain participant as the selection — none of them may drag
+    // the noise pair into the highlight.
+    for (const target of [
+      "exchange:a:x1",
+      "exchange:a:x2",
+      "exchange:a:x3",
+      "shovel:a:s1",
+      "queue:a:q1",
+      "queue:b:q2",
+    ]) {
+      const h = computeBidirectionalHighlight(
+        { nodes: graph.nodes, edges: graph.edges },
+        target,
+      );
+      expect(h.nodeIds.has("exchange:a:noise")).toBe(false);
+      expect(h.nodeIds.has("queue:a:noise")).toBe(false);
+      expect(h.edgeIds.has("b:noise")).toBe(false);
+    }
+  });
+
+  it("bidirectional highlight composes with a BROAD HOST filter: hiding host:b prevents queue:b:q2 (the shovel destination) from being highlighted — the highlight sees only the FILTERED graph, not the raw graph", () => {
+    // Broad filter: hide host:b. queue:b:q2 disappears from the pre-filter
+    // rawGraph the highlight is computed on — so the shovel's downstream
+    // half must be truncated in the highlight.
+    const filtered = applyGraphFilters(bidirectionalCanvasFixture(), {
+      hostIds: new Set(["host:a"]),
+    });
+    const h = computeBidirectionalHighlight(
+      { nodes: filtered.nodes, edges: filtered.edges },
+      "shovel:a:s1",
+    );
+    // Upstream still intact: exchange:a:x1..x3 all reachable.
+    expect(h.nodeIds.has("exchange:a:x1")).toBe(true);
+    expect(h.nodeIds.has("exchange:a:x2")).toBe(true);
+    expect(h.nodeIds.has("exchange:a:x3")).toBe(true);
+    // Downstream half is truncated — queue:b:q2 was removed by the filter
+    // and MUST NOT be resurrected by the highlight. The shovel's only
+    // outbound routing edge (s1 → q2) is also gone from the filtered edge
+    // set, so the shovel has zero downstream reach post-filter.
+    expect(h.nodeIds.has("queue:b:q2")).toBe(false);
+    expect(h.edgeIds.has("s:s1->q2")).toBe(false);
+    expect(h.outgoingCount).toBe(0);
+  });
+
+  it("bidirectional highlight composes with VISIBILITY hide: hiding a mid-chain exchange cuts the highlight at that point without resurrecting the hidden node", () => {
+    // Hide exchange:a:x3 through the visibility layer. The highlight input
+    // is the post-visibility graph, so the pipeline's real behavior is
+    // exercised here: applyGraphFilters → applyVisibility → highlight.
+    const filtered = applyGraphFilters(bidirectionalCanvasFixture());
+    const visibility = hideNodes(createEmptyVisibility(), ["exchange:a:x3"]);
+    const visible = applyVisibility(filtered, visibility);
+    const h = computeBidirectionalHighlight(
+      { nodes: visible.nodes, edges: visible.edges },
+      "shovel:a:s1",
+    );
+    // Hidden node MUST NOT reappear via the highlight.
+    expect(h.nodeIds.has("exchange:a:x3")).toBe(false);
+    // Downstream half stops at the shovel (the shovel's only downstream
+    // path was via x3 → q1) but the direct shovel destination queue:b:q2
+    // remains reachable because that path is s1 → q2 directly.
+    expect(h.nodeIds.has("queue:b:q2")).toBe(true);
+    // queue:a:q1 is now unreachable from the shovel (its only inbound was
+    // via the hidden x3), so it MUST NOT be highlighted.
+    expect(h.nodeIds.has("queue:a:q1")).toBe(false);
+  });
+
+  it("bidirectional highlight composes with ISOLATION: isolating the shovel's neighborhood constrains the highlight universe — nothing outside the isolation set is highlighted", () => {
+    // Isolate to depth-2 both directions from the shovel — that keeps the
+    // shovel, its immediate neighbors (x3 upstream, q2 downstream), and one
+    // hop past each (x2 upstream, none past q2 downstream) plus contains
+    // ancestry. Everything else disappears from the visibility overlay,
+    // including queue:a:q1 (reachable via x3 → q1 downstream but outside
+    // the isolation depth's shovel-anchored slice).
+    const filtered = applyGraphFilters(bidirectionalCanvasFixture());
+    const isolated = isolateNeighborhood(createEmptyVisibility(), "shovel:a:s1", {
+      depth: 1,
+      direction: "both",
+    });
+    const visible = applyVisibility(filtered, isolated);
+    const visibleIds = new Set(visible.nodes.map((n) => n.id));
+    // Sanity: isolation kept shovel + its immediate neighbors + contains ancestry.
+    expect(visibleIds.has("shovel:a:s1")).toBe(true);
+    expect(visibleIds.has("exchange:a:x3")).toBe(true);
+    expect(visibleIds.has("queue:b:q2")).toBe(true);
+    // Now run the bidirectional highlight over the isolated slice.
+    const h = computeBidirectionalHighlight(
+      { nodes: visible.nodes, edges: visible.edges },
+      "shovel:a:s1",
+    );
+    // The highlight only ever picks up isolation-visible nodes — even the
+    // ones structurally reachable in the raw graph (x2, x1, q1, noise pair)
+    // are absent because they were excised by isolation.
+    for (const id of h.nodeIds) {
+      expect(visibleIds.has(id)).toBe(true);
+    }
+    // The isolation slice may still contain the parent hosts/vhosts (contains
+    // ancestry), which do NOT participate in routing edges — so the
+    // highlight's node set is exactly the routing participants inside the
+    // isolation slice.
+    expect(h.nodeIds.has("shovel:a:s1")).toBe(true);
+    expect(h.nodeIds.has("exchange:a:x3")).toBe(true);
+    expect(h.nodeIds.has("queue:b:q2")).toBe(true);
+    // Confirm the noise pair is still absent regardless.
+    expect(h.nodeIds.has("exchange:a:noise")).toBe(false);
+    expect(h.nodeIds.has("queue:a:noise")).toBe(false);
+  });
+
+  it("bidirectional highlight edge set never references a node outside `highlight.nodeIds` (no dangling handles) — the invariant React Flow relies on to render selection-dimmed edges without crashing", () => {
+    const graph = applyGraphFilters(bidirectionalCanvasFixture());
+    const input = { nodes: graph.nodes, edges: graph.edges };
+    // Try every supported selection kind against the fixture and pin the
+    // invariant for each — a wiring bug that expanded edges without
+    // gating on the highlighted node set would fail here immediately.
+    for (const target of [
+      "exchange:a:x1",
+      "exchange:a:x2",
+      "exchange:a:x3",
+      "shovel:a:s1",
+      "queue:a:q1",
+      "queue:b:q2",
+    ]) {
+      const h = computeBidirectionalHighlight(input, target);
+      const edgeById = new Map(input.edges.map((e) => [e.id, e]));
+      for (const edgeId of h.edgeIds) {
+        const edge = edgeById.get(edgeId);
+        expect(edge).toBeDefined();
+        expect(h.nodeIds.has(edge!.from)).toBe(true);
+        expect(h.nodeIds.has(edge!.to)).toBe(true);
+      }
+    }
   });
 });

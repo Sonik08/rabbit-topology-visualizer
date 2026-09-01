@@ -1,17 +1,32 @@
 import { useMemo } from "react";
 import type { GraphNode } from "../../core/model";
-import { explainUpstreamPath, type PathExplanation } from "../../core/query/pathExplain";
-import type { UpstreamTraversalResult } from "../../core/graph/traversal";
+import {
+  explainDownstreamPath,
+  explainUpstreamPath,
+  type PathExplanation,
+} from "../../core/query/pathExplain";
+import type {
+  DownstreamTraversalResult,
+  UpstreamTraversalResult,
+} from "../../core/graph/traversal";
 
 export interface PathExplanationPanelProps {
   /**
-   * Traversal result for the currently selected queue or exchange. When
-   * absent, undefined, or with no paths the panel renders an empty-state hint.
+   * Upstream traversal result for the currently selected queue / exchange /
+   * shovel / federation. When absent, undefined, or with no paths the panel
+   * renders the empty-state hint for the incoming section.
    */
   traversal?: UpstreamTraversalResult;
+  /**
+   * Downstream traversal result — populated when the selection is one of the
+   * four supported entry points. When present, the panel renders a second
+   * "Downstream paths" section so the operator sees the full incoming +
+   * outgoing chain in one view.
+   */
+  downstream?: DownstreamTraversalResult;
   /** Graph nodes, used to resolve labels/host/vhost context for each step. */
   nodes: readonly GraphNode[];
-  /** Cap the number of rendered path sections. Default 12. */
+  /** Cap the number of rendered path sections per direction. Default 12. */
   maxPaths?: number;
 }
 
@@ -38,53 +53,131 @@ function normalizeMaxPaths(input: number | undefined): number {
 
 export function PathExplanationPanel({
   traversal,
+  downstream,
   nodes,
   maxPaths,
 }: PathExplanationPanelProps): JSX.Element {
   const cap = normalizeMaxPaths(maxPaths);
-  const explanations = useMemo<PathExplanation[]>(() => {
+  const upstreamExplanations = useMemo<PathExplanation[]>(() => {
     if (!traversal || traversal.paths.length === 0) return [];
     return traversal.paths.map((p) => explainUpstreamPath(p, traversal.targetNodeId, nodes));
   }, [traversal, nodes]);
+  const downstreamExplanations = useMemo<PathExplanation[]>(() => {
+    if (!downstream || downstream.paths.length === 0) return [];
+    return downstream.paths.map((p) =>
+      explainDownstreamPath(p, downstream.targetNodeId, nodes),
+    );
+  }, [downstream, nodes]);
 
-  if (!traversal) {
+  if (!traversal && !downstream) {
     return (
       <aside
-        aria-label="Upstream path explanation"
+        aria-label="Message-flow path explanation"
         data-testid="path-explanation-panel"
         style={emptyPanelStyle}
       >
-        <em>Select a queue or exchange to see how messages reach it.</em>
+        <em>Select a queue, exchange, shovel, or federation link to see how messages flow through it.</em>
       </aside>
     );
   }
 
-  if (explanations.length === 0) {
+  const hasUpstream = upstreamExplanations.length > 0;
+  const hasDownstream = downstreamExplanations.length > 0;
+  const upstreamReach = traversal?.reachableAncestorIds.length ?? 0;
+  const downstreamReach = downstream?.reachableDescendantIds.length ?? 0;
+  if (!hasUpstream && !hasDownstream) {
+    // Fully-cyclic ancestries/descendants can still surface a non-zero reach
+    // via the highlight even after the traversal cycle-terminator fix — for
+    // example a target whose only reach is a queue → exchange → queue loop
+    // where every discovered node is on the cycle. Contradicting the
+    // highlight ("no publishers/consumers found" while N nodes glow) misleads
+    // the operator, so surface the cycle-aware reach instead.
+    if (upstreamReach > 0 || downstreamReach > 0) {
+      return (
+        <aside
+          aria-label="Message-flow path explanation"
+          data-testid="path-explanation-panel"
+          style={emptyPanelStyle}
+        >
+          <em data-testid="path-explanation-cycle-reach">
+            Reachable through a closed cycle: {upstreamReach} upstream node
+            {upstreamReach === 1 ? "" : "s"} · {downstreamReach} downstream node
+            {downstreamReach === 1 ? "" : "s"}. No terminal source or sink to
+            explain — see the highlight for the cycle shape.
+          </em>
+        </aside>
+      );
+    }
     return (
       <aside
-        aria-label="Upstream path explanation"
+        aria-label="Message-flow path explanation"
         data-testid="path-explanation-panel"
         style={emptyPanelStyle}
       >
-        <em>No upstream publishers found for this node.</em>
+        <em>No upstream publishers or downstream consumers found for this node.</em>
       </aside>
     );
   }
-
-  const shown = explanations.slice(0, cap);
-  const hidden = explanations.length - shown.length;
 
   return (
     <aside
-      aria-label="Upstream path explanation"
+      aria-label="Message-flow path explanation"
       data-testid="path-explanation-panel"
       style={panelStyle}
     >
+      {hasUpstream && (
+        <PathSection
+          heading="Upstream paths"
+          direction="upstream"
+          explanations={upstreamExplanations}
+          truncated={traversal?.truncated === true}
+          cap={cap}
+        />
+      )}
+      {hasDownstream && (
+        <PathSection
+          heading="Downstream paths"
+          direction="downstream"
+          explanations={downstreamExplanations}
+          truncated={downstream?.truncated === true}
+          cap={cap}
+        />
+      )}
+    </aside>
+  );
+}
+
+interface PathSectionProps {
+  heading: string;
+  direction: "upstream" | "downstream";
+  explanations: PathExplanation[];
+  truncated: boolean;
+  cap: number;
+}
+
+function PathSection({
+  heading,
+  direction,
+  explanations,
+  truncated,
+  cap,
+}: PathSectionProps): JSX.Element {
+  const shown = explanations.slice(0, cap);
+  const hidden = explanations.length - shown.length;
+  const emptyStepMessage =
+    direction === "upstream"
+      ? "Source is the target — no upstream hops."
+      : "Target is the sink — no downstream hops.";
+  return (
+    <section data-testid={`path-explanation-${direction}`} style={sectionStyle}>
       <header style={headerRowStyle}>
-        <h4 style={headingStyle}>Upstream paths</h4>
-        <span style={countStyle} data-testid="path-explanation-count">
+        <h4 style={headingStyle}>{heading}</h4>
+        <span
+          style={countStyle}
+          data-testid={`path-explanation-${direction}-count`}
+        >
           {explanations.length} path{explanations.length === 1 ? "" : "s"}
-          {traversal.truncated ? " · truncated at max depth" : ""}
+          {truncated ? " · truncated at max depth" : ""}
         </span>
       </header>
       <ol style={listStyle}>
@@ -98,7 +191,7 @@ export function PathExplanationPanel({
             // target, AND edge sequence (rare, but cheap to guard against).
             key={`${explanation.sourceNodeId}->${explanation.targetNodeId}|${explanation.steps.map((s) => s.edgeId).join(">")}#${index}`}
             style={pathItemStyle}
-            data-testid={`path-explanation-item-${index}`}
+            data-testid={`path-explanation-${direction}-item-${index}`}
           >
             <div style={pathHeaderStyle}>
               <span style={pathIndexStyle}>Path {index + 1}</span>
@@ -107,14 +200,14 @@ export function PathExplanationPanel({
               </span>
             </div>
             {explanation.steps.length === 0 ? (
-              <p style={emptyStepStyle}>Source is the target — no upstream hops.</p>
+              <p style={emptyStepStyle}>{emptyStepMessage}</p>
             ) : (
               <ol style={stepListStyle}>
                 {explanation.steps.map((step, stepIndex) => (
                   <li
                     key={step.edgeId}
                     style={stepStyle}
-                    data-testid={`path-explanation-item-${index}-step-${stepIndex}`}
+                    data-testid={`path-explanation-${direction}-item-${index}-step-${stepIndex}`}
                   >
                     {step.sentence}
                   </li>
@@ -125,11 +218,14 @@ export function PathExplanationPanel({
         ))}
       </ol>
       {hidden > 0 && (
-        <p style={hiddenNoteStyle} data-testid="path-explanation-hidden">
+        <p
+          style={hiddenNoteStyle}
+          data-testid={`path-explanation-${direction}-hidden`}
+        >
           {hidden} more path{hidden === 1 ? "" : "s"} not shown (cap: {cap}).
         </p>
       )}
-    </aside>
+    </section>
   );
 }
 
@@ -153,6 +249,14 @@ const panelStyle: React.CSSProperties = {
   fontSize: "0.85rem",
   marginTop: "0.75rem",
   background: "#fbfbff",
+  display: "flex",
+  flexDirection: "column",
+  gap: "0.75rem",
+};
+
+const sectionStyle: React.CSSProperties = {
+  display: "flex",
+  flexDirection: "column",
 };
 
 const emptyPanelStyle: React.CSSProperties = {

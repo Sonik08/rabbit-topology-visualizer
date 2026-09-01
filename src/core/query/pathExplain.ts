@@ -1,5 +1,10 @@
 import type { GraphEdgeKind, GraphNode } from "../model";
-import type { UpstreamPath, UpstreamStep } from "../graph/traversal";
+import type {
+  DownstreamPath,
+  DownstreamStep,
+  UpstreamPath,
+  UpstreamStep,
+} from "../graph/traversal";
 
 export interface ExplainedStep {
   edgeId: string;
@@ -55,8 +60,43 @@ export function explainUpstreamPath(
   };
 }
 
+/**
+ * Downstream counterpart of {@link explainUpstreamPath}. `DownstreamPath.steps`
+ * already flow target → sink (natural reading order), so the same per-step
+ * renderer is reused — the only difference is the shape wrapping the steps.
+ */
+export function explainDownstreamPath(
+  path: DownstreamPath,
+  targetNodeId: string,
+  nodes: readonly GraphNode[],
+): PathExplanation {
+  const nodeById = new Map<string, GraphNode>();
+  for (const n of nodes) nodeById.set(n.id, n);
+
+  const steps: ExplainedStep[] = path.steps.map((step) => ({
+    edgeId: step.edgeId,
+    edgeKind: step.kind,
+    fromNode: nodeById.get(step.fromNodeId),
+    toNode: nodeById.get(step.toNodeId),
+    routingKey: step.routingKey,
+    label: step.label,
+    sentence: sentenceForStep(step, nodeById),
+  }));
+
+  return {
+    // For the downstream explanation the "source" of the reader-facing flow
+    // sentence is the selected target itself and the "target" is the sink;
+    // populate the PathExplanation fields accordingly so the panel can render
+    // target → sink summary lines symmetric to the upstream direction.
+    sourceNodeId: targetNodeId,
+    targetNodeId: path.sinkNodeId,
+    steps,
+    summary: steps.map((s) => s.sentence).join("\n"),
+  };
+}
+
 function sentenceForStep(
-  step: UpstreamStep,
+  step: UpstreamStep | DownstreamStep,
   nodeById: Map<string, GraphNode>,
 ): string {
   const from = describeNode(step.fromNodeId, nodeById);

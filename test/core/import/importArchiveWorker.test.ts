@@ -731,3 +731,247 @@ describe("getSharedTopologyWorkerClient — browser-safe factory", () => {
     resetSharedTopologyWorkerClient();
   });
 });
+
+/**
+ * Sanitized 5-node bidirectional chain used by every bidirectional worker
+ * test below:
+ *
+ *   exchange:a:x1 → exchange:a:x2 → shovel:a:s1 → exchange:a:x3 → queue:a:q1
+ *
+ * Plus a completely unrelated pair (`exchange:a:noise → queue:a:noise`)
+ * that the traversal must NEVER touch. The fixture is intentionally small
+ * — the point of these tests is the WIRE protocol / client envelope, not
+ * traversal correctness (that's in bidirectionalTraversal.test.ts).
+ */
+function bidirectionalFixture(): {
+  nodes: Array<{ id: string; kind: string; label: string; data: unknown }>;
+  edges: Array<{
+    id: string;
+    from: string;
+    to: string;
+    kind: string;
+    routingKey?: string;
+  }>;
+} {
+  return {
+    nodes: [
+      { id: "exchange:a:x1", kind: "exchange", label: "x1", data: {} },
+      { id: "exchange:a:x2", kind: "exchange", label: "x2", data: {} },
+      { id: "exchange:a:x3", kind: "exchange", label: "x3", data: {} },
+      { id: "shovel:a:s1", kind: "shovel", label: "s1", data: {} },
+      { id: "queue:a:q1", kind: "queue", label: "q1", data: {} },
+      { id: "exchange:a:noise", kind: "exchange", label: "noise", data: {} },
+      { id: "queue:a:noise", kind: "queue", label: "noise", data: {} },
+    ],
+    edges: [
+      { id: "b:x1->x2", from: "exchange:a:x1", to: "exchange:a:x2", kind: "binds", routingKey: "k" },
+      { id: "b:x2->s1", from: "exchange:a:x2", to: "shovel:a:s1", kind: "binds", routingKey: "k" },
+      { id: "s:s1->x3", from: "shovel:a:s1", to: "exchange:a:x3", kind: "shovels" },
+      { id: "b:x3->q1", from: "exchange:a:x3", to: "queue:a:q1", kind: "binds", routingKey: "k" },
+      { id: "b:noise", from: "exchange:a:noise", to: "queue:a:noise", kind: "binds", routingKey: "n" },
+    ],
+  };
+}
+
+describe("handleImportArchiveMessage — bidirectional-for-node dispatcher (task 58 worker protocol)", () => {
+  it("processes a well-formed bidirectional-for-node request and returns the combined upstream + downstream envelope with the request id echoed", async () => {
+    const input = bidirectionalFixture();
+    const response = await handleImportArchiveMessage({
+      id: 42,
+      kind: "bidirectional-for-node",
+      input,
+      targetNodeId: "shovel:a:s1",
+    });
+    expect(response.id).toBe(42);
+    expect(response.status).toBe("ok");
+    if (response.status !== "ok") throw new Error("expected ok");
+    expect(response.kind).toBe("bidirectional-for-node");
+    if (response.kind !== "bidirectional-for-node") throw new Error("expected bidirectional-for-node");
+    // Selecting the shovel walks both directions: upstream reaches
+    // x2 + x1, downstream reaches x3 + q1. The unrelated noise pair MUST
+    // not appear on either side.
+    expect(new Set(response.result.upstream.reachableAncestorIds)).toEqual(
+      new Set(["exchange:a:x2", "exchange:a:x1"]),
+    );
+    expect(new Set(response.result.downstream.reachableDescendantIds)).toEqual(
+      new Set(["exchange:a:x3", "queue:a:q1"]),
+    );
+    expect(response.result.upstream.reachableAncestorIds).not.toContain("exchange:a:noise");
+    expect(response.result.downstream.reachableDescendantIds).not.toContain("queue:a:noise");
+  });
+
+  it("forwards `options` (maxDepth, followDeadLetter) — proves the dispatcher does not silently drop the caller's traversal knobs", async () => {
+    const input = bidirectionalFixture();
+    const response = await handleImportArchiveMessage({
+      id: 43,
+      kind: "bidirectional-for-node",
+      input,
+      targetNodeId: "shovel:a:s1",
+      options: { maxDepth: 1 },
+    });
+    if (response.status !== "ok" || response.kind !== "bidirectional-for-node") {
+      throw new Error("expected bidirectional-for-node ok response");
+    }
+    // maxDepth=1 → only immediate neighbors reachable in each direction.
+    expect(new Set(response.result.upstream.reachableAncestorIds)).toEqual(
+      new Set(["exchange:a:x2"]),
+    );
+    expect(new Set(response.result.downstream.reachableDescendantIds)).toEqual(
+      new Set(["exchange:a:x3"]),
+    );
+    expect(response.result.upstream.truncated || response.result.downstream.truncated).toBe(true);
+  });
+
+  it("rejects a bidirectional-for-node request missing `input` with a structured error envelope (not an unhandled rejection)", async () => {
+    const response = await handleImportArchiveMessage({
+      id: 44,
+      kind: "bidirectional-for-node",
+      targetNodeId: "queue:a:q1",
+    });
+    expect(response.status).toBe("error");
+    if (response.status !== "error") throw new Error("expected error");
+    expect(response.id).toBe(44);
+    expect(response.message).toMatch(/bidirectional-for-node.*missing 'input'/i);
+  });
+
+  it("rejects a bidirectional-for-node request missing `targetNodeId` with a structured error envelope", async () => {
+    const response = await handleImportArchiveMessage({
+      id: 45,
+      kind: "bidirectional-for-node",
+      input: bidirectionalFixture(),
+    });
+    expect(response.status).toBe("error");
+    if (response.status !== "error") throw new Error("expected error");
+    expect(response.id).toBe(45);
+    expect(response.message).toMatch(/bidirectional-for-node.*targetNodeId/i);
+  });
+
+  it("targeting an unsupported node id returns an OK envelope with empty per-direction reach — safe no-op contract mirrored across the worker protocol", async () => {
+    const input = bidirectionalFixture();
+    // No such id — dispatcher must NOT throw; the traversal safe-no-ops.
+    const response = await handleImportArchiveMessage({
+      id: 46,
+      kind: "bidirectional-for-node",
+      input,
+      targetNodeId: "queue:a:ghost",
+    });
+    if (response.status !== "ok" || response.kind !== "bidirectional-for-node") {
+      throw new Error("expected ok bidirectional-for-node response");
+    }
+    expect(response.result.upstream.reachableAncestorIds).toEqual([]);
+    expect(response.result.downstream.reachableDescendantIds).toEqual([]);
+  });
+});
+
+describe("createImportArchiveWorkerClient — bidirectionalForNode round-trip + malformed-response handling", () => {
+  it("round-trips a bidirectional-for-node request through the shim worker and resolves with the combined envelope", async () => {
+    const shim = createShimWorker((req) => handleImportArchiveMessage(req));
+    const client = createImportArchiveWorkerClient({ createWorker: () => shim });
+    const result = await client.bidirectionalForNode(
+      bidirectionalFixture(),
+      "shovel:a:s1",
+    );
+    expect(result.targetNodeId).toBe("shovel:a:s1");
+    expect(new Set(result.upstream.reachableAncestorIds)).toEqual(
+      new Set(["exchange:a:x1", "exchange:a:x2"]),
+    );
+    expect(new Set(result.downstream.reachableDescendantIds)).toEqual(
+      new Set(["exchange:a:x3", "queue:a:q1"]),
+    );
+    // Wire-format check — the request the client posts is a bona fide
+    // bidirectional-for-node payload with the right shape.
+    const posted = shim.posted[0]!;
+    expect(posted.kind).toBe("bidirectional-for-node");
+    if (posted.kind !== "bidirectional-for-node") throw new Error("expected bidirectional-for-node");
+    expect(posted.targetNodeId).toBe("shovel:a:s1");
+    client.terminate();
+  });
+
+  it("propagates a status=error response from the worker as a rejected Promise", async () => {
+    const shim = createShimWorker(async (req) => ({
+      id: req.id,
+      status: "error",
+      message: "traversal blew up on the worker",
+    }));
+    const client = createImportArchiveWorkerClient({ createWorker: () => shim });
+    await expect(
+      client.bidirectionalForNode(bidirectionalFixture(), "shovel:a:s1"),
+    ).rejects.toThrow(/traversal blew up on the worker/);
+    client.terminate();
+  });
+
+  it("rejects with a descriptive error when the worker responds with the WRONG kind (protocol mismatch — malformed response)", async () => {
+    // Worker respects the id but returns an unrelated `ok` kind. The client
+    // must NOT silently pretend the bidirectional call succeeded with a
+    // BuildGraphResult in the wrong slot — every helper carries an explicit
+    // envelope-kind check that must fire.
+    const shim = createShimWorker(async (req) => ({
+      id: req.id,
+      status: "ok",
+      kind: "build-graph",
+      result: { nodes: [], edges: [], diagnostics: [] },
+    }));
+    const client = createImportArchiveWorkerClient({ createWorker: () => shim });
+    await expect(
+      client.bidirectionalForNode(bidirectionalFixture(), "queue:a:q1"),
+    ).rejects.toThrow(/unexpected response kind.*bidirectional-for-node/i);
+    client.terminate();
+  });
+
+  it("terminate() rejects an in-flight bidirectionalForNode call (no hang on unmount)", async () => {
+    // Worker never responds — simulates the tab closing mid-traversal.
+    const shim = createShimWorker(() => new Promise<never>(() => {}));
+    const client = createImportArchiveWorkerClient({ createWorker: () => shim });
+    const pending = client.bidirectionalForNode(
+      bidirectionalFixture(),
+      "queue:a:q1",
+    );
+    client.terminate();
+    await expect(pending).rejects.toThrow(/Worker terminated before response/);
+  });
+});
+
+describe("createMainThreadClient — bidirectionalForNode fallback (Worker-unavailable path)", () => {
+  it("services a bidirectionalForNode call end-to-end on the main thread with the same envelope shape as the worker client", async () => {
+    const client = createMainThreadClient();
+    const result = await client.bidirectionalForNode(
+      bidirectionalFixture(),
+      "exchange:a:x2",
+    );
+    expect(result.targetNodeId).toBe("exchange:a:x2");
+    // From x2, upstream reaches only x1; downstream reaches shovel + x3 + q1.
+    expect(result.upstream.reachableAncestorIds).toEqual(["exchange:a:x1"]);
+    expect(new Set(result.downstream.reachableDescendantIds)).toEqual(
+      new Set(["shovel:a:s1", "exchange:a:x3", "queue:a:q1"]),
+    );
+    client.terminate();
+  });
+
+  it("returns a rejected Promise (does NOT throw synchronously) when bidirectionalForNode is called with invalid input", async () => {
+    const client = createMainThreadClient();
+    let syncThrew = false;
+    let promise: Promise<unknown>;
+    try {
+      promise = client.bidirectionalForNode(
+        null as unknown as Parameters<
+          ReturnType<typeof createMainThreadClient>["bidirectionalForNode"]
+        >[0],
+        "queue:whatever",
+      );
+    } catch (err) {
+      syncThrew = true;
+      promise = Promise.reject(err);
+    }
+    expect(syncThrew).toBe(false);
+    await expect(promise).rejects.toBeInstanceOf(Error);
+    client.terminate();
+  });
+
+  it("after terminate() the fallback client rejects further bidirectionalForNode calls with a `terminated` message (matches the worker client's contract)", async () => {
+    const client = createMainThreadClient();
+    client.terminate();
+    await expect(
+      client.bidirectionalForNode(bidirectionalFixture(), "queue:a:q1"),
+    ).rejects.toThrow(/terminated/);
+  });
+});

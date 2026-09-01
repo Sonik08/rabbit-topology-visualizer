@@ -191,6 +191,21 @@ function mockClient(): ImportArchiveWorkerClient {
     buildGraph: vi.fn(async () => GRAPH_FIXTURE),
     upstreamForQueue: vi.fn(async () => TRAVERSAL),
     upstreamForExchange: vi.fn(async () => TRAVERSAL),
+    // The hook now calls `bidirectionalForNode` for the selection-highlight
+    // path — return the upstream traversal as the upstream half of the
+    // bidirectional envelope. Empty downstream keeps existing selection-only
+    // assertions stable.
+    bidirectionalForNode: vi.fn(async (_input, targetNodeId: string) => ({
+      targetNodeId,
+      upstream: { ...TRAVERSAL, targetNodeId },
+      downstream: {
+        targetNodeId,
+        reachableDescendantIds: [],
+        paths: [],
+        truncated: false,
+        visitedCycles: [],
+      },
+    })),
     terminate: vi.fn(),
   } as unknown as ImportArchiveWorkerClient;
 }
@@ -203,6 +218,76 @@ function emptyImportResult(): ImportResult {
     diagnostics: [],
   };
 }
+
+describe("TopologyGraphCanvas — bidirectional selection summary (task 58)", () => {
+  it("selection summary reports incoming AND outgoing counts as separate segments so the operator can tell direction at a glance", async () => {
+    const client = mockClient();
+    // Override the mock so bidirectional traversal returns BOTH upstream
+    // and downstream reach with distinct counts — proving the summary
+    // renders both directions separately, not just one composite count.
+    (client.bidirectionalForNode as unknown as { mockImplementation: (fn: unknown) => void })
+      .mockImplementation(async () => ({
+        targetNodeId: "queue:h:q",
+        upstream: {
+          targetNodeId: "queue:h:q",
+          reachableAncestorIds: ["exchange:h:x"],
+          paths: [],
+          truncated: false,
+          visitedCycles: [],
+        },
+        downstream: {
+          targetNodeId: "queue:h:q",
+          // Fabricate two downstream descendants so the outgoing counter
+          // is distinguishable from the incoming counter.
+          reachableDescendantIds: ["exchange:h:unrelated", "queue:h:unrelated"],
+          paths: [],
+          truncated: false,
+          visitedCycles: [],
+        },
+      }));
+    render(
+      <TopologyGraphCanvas
+        result={emptyImportResult()}
+        workerClient={client}
+        selectedNodeId="queue:h:q"
+        onSelectionChange={() => {}}
+      />,
+    );
+    const summary = await waitFor(() =>
+      screen.getByTestId("topology-graph-selection-summary"),
+    );
+    // Both direction words appear in the summary text.
+    await waitFor(() => {
+      expect(summary.textContent).toMatch(/incoming/);
+      expect(summary.textContent).toMatch(/outgoing/);
+    });
+    // Incoming count is 1 (exchange:h:x). Outgoing count is 2 (the two
+    // fabricated descendants). The distinct numbers prove the counts are
+    // routed to their intended sides.
+    await waitFor(() => {
+      expect(summary.textContent).toMatch(/1 incoming/);
+      expect(summary.textContent).toMatch(/2 outgoing/);
+    });
+  });
+
+  it("selecting a host / vhost / external node — kinds outside the four supported entry points — surfaces the safe-no-op message instead of a bidirectional highlight", async () => {
+    const client = mockClient();
+    render(
+      <TopologyGraphCanvas
+        result={emptyImportResult()}
+        workerClient={client}
+        selectedNodeId="host:h"
+        onSelectionChange={() => {}}
+      />,
+    );
+    const summary = await waitFor(() =>
+      screen.getByTestId("topology-graph-selection-summary"),
+    );
+    expect(summary.textContent).toMatch(
+      /bidirectional highlight only supports queues, exchanges, shovels, and federation links/,
+    );
+  });
+});
 
 describe("TopologyGraphCanvas — controlled selection mode", () => {
   it("uses the `selectedNodeId` prop as the authoritative selection and surfaces the selection summary once the highlight resolves", async () => {

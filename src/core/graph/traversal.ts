@@ -189,6 +189,8 @@ export function traverseUpstream(
       continue;
     }
 
+    let expandedAny = false;
+    let closesAncestryCycle = false;
     for (const edge of inbound) {
       const upstream = edge.from;
       if (distance.has(upstream)) {
@@ -197,11 +199,24 @@ export function traverseUpstream(
         // (same node reachable via two branches). Either way, don't
         // re-expand; each node is processed at most once.
         visitedCycles.add(upstream);
+        if (isOnAncestryChain(currentId, upstream, parent, targetNodeId)) {
+          closesAncestryCycle = true;
+        }
         continue;
       }
       distance.set(upstream, currentDepth + 1);
       parent.set(upstream, { parentId: currentId, edge });
       queue.push(upstream);
+      expandedAny = true;
+    }
+    // BFS-tree leaf that closed a cycle back onto its own ancestry: enumerate
+    // it as a representative source so `paths` is not empty when
+    // `reachableAncestorIds` is non-empty. A diamond merge (already-visited
+    // node reached via a sibling branch, NOT on the current ancestry chain)
+    // is intentionally excluded — its ancestry was already emitted via the
+    // sibling and adding a duplicate source would mislead the operator.
+    if (!expandedAny && closesAncestryCycle && currentId !== targetNodeId) {
+      sourceNodes.add(currentId);
     }
   }
 
@@ -239,4 +254,241 @@ export function traverseUpstream(
     truncated,
     visitedCycles: [...visitedCycles].sort(),
   };
+}
+
+/**
+ * One outgoing hop discovered while walking downstream from the target
+ * toward one of the descendant sinks. Mirrors {@link UpstreamStep} but the
+ * traversal direction points AWAY from the target.
+ */
+export interface DownstreamStep {
+  edgeId: string;
+  fromNodeId: string;
+  toNodeId: string;
+  kind: GraphEdgeKind;
+  routingKey?: string;
+  label?: string;
+}
+
+/**
+ * Downstream path — ordered edges from the target toward one ultimate sink
+ * (a queue with no further outgoing edges, an unresolved external endpoint,
+ * or any node cut off at `maxDepth`).
+ */
+export interface DownstreamPath {
+  sinkNodeId: string;
+  steps: DownstreamStep[];
+}
+
+export interface DownstreamTraversalResult {
+  targetNodeId: string;
+  reachableDescendantIds: string[];
+  paths: DownstreamPath[];
+  truncated: boolean;
+  visitedCycles: string[];
+}
+
+/**
+ * Forward-traverse the graph from `targetNodeId` following routing edges
+ * (`binds`, `routes`, `alternate-exchange`, `shovels`, `federates`, optionally
+ * `dead-letter`) to enumerate every descendant node the target can reach.
+ *
+ * BFS with a global visited set — same complexity guarantee as
+ * {@link traverseUpstream}: each node is expanded at most once, so total cost
+ * is `O(V + E)` and diamonds / fan-outs do not blow up traversal time. Each
+ * sink is reported with its shortest forward path from the target.
+ */
+export function traverseDownstream(
+  input: UpstreamGraphInput,
+  targetNodeId: string,
+  options: UpstreamTraversalOptions = {},
+): DownstreamTraversalResult {
+  const maxDepth = normalizeMaxDepth(options.maxDepth);
+  const includeDeadLetter = options.followDeadLetter === true;
+  const followedKinds = new Set<GraphEdgeKind>(ROUTING_EDGE_KINDS);
+  if (includeDeadLetter) followedKinds.add(DEAD_LETTER_EDGE_KIND);
+
+  const outgoing = new Map<string, GraphEdge[]>();
+  for (const e of input.edges) {
+    if (!followedKinds.has(e.kind)) continue;
+    const bucket = outgoing.get(e.from);
+    if (bucket === undefined) outgoing.set(e.from, [e]);
+    else bucket.push(e);
+  }
+
+  interface Parent {
+    parentId: string; // upstream node (one step closer to the target)
+    edge: GraphEdge;
+  }
+  const distance = new Map<string, number>();
+  const parent = new Map<string, Parent>();
+  const sinkNodes = new Set<string>();
+  const visitedCycles = new Set<string>();
+  let truncated = false;
+
+  distance.set(targetNodeId, 0);
+  const queue: string[] = [targetNodeId];
+  let head = 0;
+  while (head < queue.length) {
+    const currentId = queue[head]!;
+    head += 1;
+    const currentDepth = distance.get(currentId)!;
+    const out = outgoing.get(currentId) ?? [];
+    if (out.length === 0) {
+      if (currentId !== targetNodeId) sinkNodes.add(currentId);
+      continue;
+    }
+    if (currentDepth >= maxDepth) {
+      truncated = true;
+      if (currentId !== targetNodeId) sinkNodes.add(currentId);
+      continue;
+    }
+    let expandedAny = false;
+    let closesAncestryCycle = false;
+    for (const edge of out) {
+      const next = edge.to;
+      if (distance.has(next)) {
+        visitedCycles.add(next);
+        if (isOnAncestryChain(currentId, next, parent, targetNodeId)) {
+          closesAncestryCycle = true;
+        }
+        continue;
+      }
+      distance.set(next, currentDepth + 1);
+      parent.set(next, { parentId: currentId, edge });
+      queue.push(next);
+      expandedAny = true;
+    }
+    // Same rule as `traverseUpstream`: only emit a representative sink when
+    // the BFS-tree leaf actually closes a cycle back onto its own ancestry to
+    // the target — never for diamond merges, whose ancestry is already
+    // covered by the sibling branch that reached the merge point first.
+    if (!expandedAny && closesAncestryCycle && currentId !== targetNodeId) {
+      sinkNodes.add(currentId);
+    }
+  }
+
+  const reachableDescendantIds = [...distance.keys()]
+    .filter((id) => id !== targetNodeId)
+    .sort();
+
+  const paths: DownstreamPath[] = [];
+  for (const sinkId of sinkNodes) {
+    // Walk the parent chain from sink back to target, then reverse so the
+    // reported steps flow target → sink (natural reading direction for a
+    // downstream path).
+    const reverseSteps: DownstreamStep[] = [];
+    let cursor = sinkId;
+    while (cursor !== targetNodeId) {
+      const p = parent.get(cursor);
+      if (!p) break;
+      reverseSteps.push({
+        edgeId: p.edge.id,
+        fromNodeId: p.parentId,
+        toNodeId: cursor,
+        kind: p.edge.kind,
+        routingKey: p.edge.routingKey,
+        label: p.edge.label,
+      });
+      cursor = p.parentId;
+    }
+    reverseSteps.reverse();
+    paths.push({ sinkNodeId: sinkId, steps: reverseSteps });
+  }
+  paths.sort((a, b) => a.sinkNodeId.localeCompare(b.sinkNodeId));
+
+  return {
+    targetNodeId,
+    reachableDescendantIds,
+    paths,
+    truncated,
+    visitedCycles: [...visitedCycles].sort(),
+  };
+}
+
+/**
+ * Combined upstream + downstream traversal from a single target. Used by the
+ * bidirectional selection-highlight path: selecting a queue/exchange/shovel/
+ * federation node exposes every reachable incoming AND outgoing routing chain
+ * so the operator can see the full end-to-end message flow at a glance.
+ *
+ * Target kinds outside {`queue`, `exchange`, `shovel`, `federation`} produce
+ * an empty result — safe no-op for host/vhost/external selections (the UI
+ * treats those as structural, not routing, entry points).
+ */
+export interface BidirectionalTraversalResult {
+  targetNodeId: string;
+  upstream: UpstreamTraversalResult;
+  downstream: DownstreamTraversalResult;
+}
+
+const BIDIRECTIONAL_SUPPORTED_KINDS: ReadonlySet<GraphNode["kind"]> = new Set<GraphNode["kind"]>([
+  "queue",
+  "exchange",
+  "shovel",
+  "federation",
+]);
+
+export function bidirectionalForNode(
+  input: UpstreamGraphInput,
+  targetNodeId: string,
+  options: UpstreamTraversalOptions = {},
+): BidirectionalTraversalResult {
+  const target = findTargetNode(input.nodes, targetNodeId);
+  const emptyUp: UpstreamTraversalResult = {
+    targetNodeId,
+    reachableAncestorIds: [],
+    paths: [],
+    truncated: false,
+    visitedCycles: [],
+  };
+  const emptyDown: DownstreamTraversalResult = {
+    targetNodeId,
+    reachableDescendantIds: [],
+    paths: [],
+    truncated: false,
+    visitedCycles: [],
+  };
+  if (!target || !BIDIRECTIONAL_SUPPORTED_KINDS.has(target.kind)) {
+    return { targetNodeId, upstream: emptyUp, downstream: emptyDown };
+  }
+  return {
+    targetNodeId,
+    upstream: traverseUpstream(input, targetNodeId, options),
+    downstream: traverseDownstream(input, targetNodeId, options),
+  };
+}
+
+function findTargetNode(nodes: GraphNode[], id: string): GraphNode | undefined {
+  for (const n of nodes) if (n.id === id) return n;
+  return undefined;
+}
+
+/**
+ * True when `candidateId` is on `startId`'s BFS-parent chain back to
+ * `targetNodeId` (inclusive of both endpoints). Used by both traversal
+ * directions to distinguish a cycle-back (the already-visited node is an
+ * ancestor of the current node in the BFS tree) from a diamond merge (the
+ * already-visited node is a sibling/cousin reached via a different branch).
+ *
+ * Only cycle-backs promote a BFS-tree leaf to a representative source/sink;
+ * diamond merges do not, because the sibling branch already carries the
+ * merged node's ancestry.
+ */
+function isOnAncestryChain(
+  startId: string,
+  candidateId: string,
+  parent: Map<string, { parentId: string; edge: GraphEdge }>,
+  targetNodeId: string,
+): boolean {
+  if (candidateId === startId) return true;
+  if (candidateId === targetNodeId) return true;
+  let cursor = startId;
+  while (cursor !== targetNodeId) {
+    const p = parent.get(cursor);
+    if (!p) return false;
+    if (p.parentId === candidateId) return true;
+    cursor = p.parentId;
+  }
+  return false;
 }

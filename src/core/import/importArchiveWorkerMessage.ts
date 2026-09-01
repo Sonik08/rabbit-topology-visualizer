@@ -1,7 +1,9 @@
 import { buildGraph, type BuildGraphInput, type BuildGraphResult } from "../graph/buildGraph";
 import {
+  bidirectionalForNode,
   upstreamForExchange,
   upstreamForQueue,
+  type BidirectionalTraversalResult,
   type UpstreamGraphInput,
   type UpstreamTraversalOptions,
   type UpstreamTraversalResult,
@@ -40,6 +42,13 @@ export type WorkerRequest =
       input: UpstreamGraphInput;
       targetExchangeId: string;
       options?: UpstreamTraversalOptions;
+    }
+  | {
+      id: number;
+      kind: "bidirectional-for-node";
+      input: UpstreamGraphInput;
+      targetNodeId: string;
+      options?: UpstreamTraversalOptions;
     };
 
 /** Success/failure envelope posted back from the worker. */
@@ -58,6 +67,12 @@ export type WorkerResponse =
       status: "ok";
       kind: "upstream-for-exchange";
       result: UpstreamTraversalResult;
+    }
+  | {
+      id: number;
+      status: "ok";
+      kind: "bidirectional-for-node";
+      result: BidirectionalTraversalResult;
     }
   | {
       id: number;
@@ -148,6 +163,19 @@ export async function handleImportArchiveMessage(
         const options = record.options as UpstreamTraversalOptions | undefined;
         const result = upstreamForExchange(input, target, options);
         return { id, status: "ok", kind: "upstream-for-exchange", result };
+      }
+      case "bidirectional-for-node": {
+        const input = record.input as UpstreamGraphInput | undefined;
+        const target = record.targetNodeId;
+        if (!input) throw new Error("bidirectional-for-node request is missing 'input'.");
+        if (typeof target !== "string") {
+          throw new Error(
+            "bidirectional-for-node request is missing 'targetNodeId' string.",
+          );
+        }
+        const options = record.options as UpstreamTraversalOptions | undefined;
+        const result = bidirectionalForNode(input, target, options);
+        return { id, status: "ok", kind: "bidirectional-for-node", result };
       }
       default:
         throw new Error(`Unknown request kind '${describe(kind)}'.`);

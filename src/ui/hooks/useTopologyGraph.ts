@@ -2,10 +2,10 @@ import { useEffect, useMemo, useState } from "react";
 import type { BuildGraphResult } from "../../core/graph/buildGraph";
 import { applyGraphFilters } from "../../core/graph/filterGraph";
 import type { GraphNode } from "../../core/model";
-import type { UpstreamTraversalResult } from "../../core/graph/traversal";
+import type { BidirectionalTraversalResult } from "../../core/graph/traversal";
 import {
-  highlightFromTraversal,
-  type UpstreamHighlight,
+  bidirectionalHighlightFromTraversal,
+  type BidirectionalHighlight,
 } from "../../core/graph/upstreamHighlight";
 import { aggregateImportedTopology } from "../../core/import";
 import type {
@@ -15,7 +15,21 @@ import type {
 import { toGraphFilters, type FilterState } from "../components/TopologyFiltersPanel";
 
 const EMPTY_GRAPH: BuildGraphResult = { nodes: [], edges: [], diagnostics: [] };
-const EMPTY_HIGHLIGHT: UpstreamHighlight = { nodeIds: new Set(), edgeIds: new Set() };
+const EMPTY_HIGHLIGHT: BidirectionalHighlight = {
+  nodeIds: new Set(),
+  edgeIds: new Set(),
+  incomingCount: 0,
+  outgoingCount: 0,
+  truncated: false,
+};
+
+// Kinds the selection highlight actually resolves against — matches the
+// worker-side supported-kind set in `bidirectionalForNode`. UI selection of
+// a host/vhost/external node is a safe no-op (empty highlight) so those are
+// intentionally excluded.
+const SELECTION_SUPPORTED_KINDS: ReadonlySet<GraphNode["kind"]> = new Set<
+  GraphNode["kind"]
+>(["queue", "exchange", "shovel", "federation"]);
 
 export interface UseTopologyGraphInput {
   result: ImportResult;
@@ -29,8 +43,15 @@ export interface UseTopologyGraphState {
   rawGraph: BuildGraphResult;
   /** `rawGraph` after `applyGraphFilters` (synchronous, main-thread). */
   graph: BuildGraphResult;
-  /** Async highlight for the selected node — computed via worker traversal. */
-  highlight: UpstreamHighlight;
+  /**
+   * Async highlight for the selected node — computed via a single
+   * bidirectional worker traversal that unions the upstream ancestry and
+   * downstream reach of the target node. `nodeIds`/`edgeIds` remain the
+   * combined highlight set the renderer already dimmed against; the
+   * `upstream`/`downstream` fields expose the per-direction traversal for
+   * summary bars and the dual-section path panel.
+   */
+  highlight: BidirectionalHighlight;
   /** True while the worker is computing `buildGraph` for the current result. */
   buildLoading: boolean;
   /** True while the worker is computing the traversal for the current selection. */
@@ -62,7 +83,7 @@ export function useTopologyGraph({
 }: UseTopologyGraphInput): UseTopologyGraphState {
   const [rawGraph, setRawGraph] = useState<BuildGraphResult>(EMPTY_GRAPH);
   const [buildLoading, setBuildLoading] = useState(false);
-  const [highlight, setHighlight] = useState<UpstreamHighlight>(EMPTY_HIGHLIGHT);
+  const [highlight, setHighlight] = useState<BidirectionalHighlight>(EMPTY_HIGHLIGHT);
   const [highlightLoading, setHighlightLoading] = useState(false);
 
   useEffect(() => {
@@ -116,7 +137,7 @@ export function useTopologyGraph({
       return;
     }
     const target = graph.nodes.find((n) => n.id === selectedNodeId);
-    if (!target || (target.kind !== "queue" && target.kind !== "exchange")) {
+    if (!target || !SELECTION_SUPPORTED_KINDS.has(target.kind)) {
       setHighlight(EMPTY_HIGHLIGHT);
       setHighlightLoading(false);
       return;
@@ -130,14 +151,12 @@ export function useTopologyGraph({
     setHighlightLoading(true);
     const traversalOptions = { maxDepth: filters.maxDepth };
     const input = { nodes: graph.nodes, edges: graph.edges };
-    const traversalPromise: Promise<UpstreamTraversalResult> =
-      target.kind === "queue"
-        ? workerClient.upstreamForQueue(input, selectedNodeId, traversalOptions)
-        : workerClient.upstreamForExchange(input, selectedNodeId, traversalOptions);
+    const traversalPromise: Promise<BidirectionalTraversalResult> =
+      workerClient.bidirectionalForNode(input, selectedNodeId, traversalOptions);
     traversalPromise
       .then((traversal) => {
         if (cancelled) return;
-        setHighlight(highlightFromTraversal(input, selectedNodeId, traversal));
+        setHighlight(bidirectionalHighlightFromTraversal(input, traversal));
       })
       .catch(() => {
         if (cancelled) return;
